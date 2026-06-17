@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <omp.h>
 #include <stdexcept>
 #include <string>
@@ -14,6 +15,14 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
+
+#include <arrow/api.h>
+#include <arrow/io/file.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
+#include <arrow/util/logging.h>
+#include <arrow/util/macros.h>
+#include <parquet/arrow/writer.h>
 
 using namespace std;
 
@@ -110,8 +119,7 @@ struct MmapFile
     MmapFile &operator=(const MmapFile &) = delete;
 };
 
-template <class K>
-static size_t buildNodeMap(const string &path, const ConvertOptions &opts, unordered_map<K, K> &node_map)
+template <class K> size_t buildNodeMap(const string &path, const ConvertOptions &opts, unordered_map<K, K> &node_map)
 {
     ifstream f(path);
     if (!f)
@@ -135,8 +143,8 @@ static size_t buildNodeMap(const string &path, const ConvertOptions &opts, unord
 }
 
 template <class K, class O>
-static CSRGraph<K, O> buildCSRFromEdges(const string &edges_file, const ConvertOptions &opts,
-                                        const unordered_map<K, K> &node_map, size_t N)
+CSRGraph<K, O> buildCSRFromEdges(const string &edges_file, const ConvertOptions &opts,
+                                 const unordered_map<K, K> &node_map, size_t N)
 {
     const int T = omp_get_max_threads();
     MmapFile mf(edges_file);
@@ -271,7 +279,7 @@ inline uint32_t numDigits(uint32_t n)
     return 10;
 }
 
-template <class K, class O> static void writeGraphToMetis(const CSRGraph<K, O> &g, const string &output_file)
+template <class K, class O> void writeGraphToMetis(const CSRGraph<K, O> &g, const string &output_file)
 {
     size_t n = g.span(), m = g.size() / 2;
     char header[128];
@@ -335,46 +343,52 @@ template <class K, class O> static void writeGraphToMetis(const CSRGraph<K, O> &
     close(fd);
 }
 
-template <class T> static std::shared_ptr<arrow::Array> makeUInt64Array(const std::vector<T> &values)
+template <class T> std::shared_ptr<arrow::Array> makeUInt64Array(const std::vector<T> &values)
 {
-    arrow::UInt64Builder builder;
-    ARROW_THROW_NOT_OK(builder.Reserve(values.size()));
-
-    for (auto x : values)
-        ARROW_THROW_NOT_OK(builder.Append(static_cast<uint64_t>(x)));
-
-    auto result = builder.Finish();
-    if (!result.ok())
-        throw std::runtime_error(result.status().ToString());
-
-    return *result;
+    if constexpr (std::is_same<T, uint64_t>::value)
+    {
+        auto buffer =
+            arrow::Buffer::Wrap(reinterpret_cast<const uint8_t *>(values.data()), values.size() * sizeof(uint64_t));
+        auto data = arrow::ArrayData::Make(arrow::uint64(), values.size(), {nullptr, buffer}, 0);
+        return arrow::MakeArray(data);
+    }
+    else
+    {
+        arrow::UInt64Builder builder;
+        ARROW_CHECK_OK(builder.Reserve(values.size()));
+        ARROW_CHECK_OK(builder.AppendValues(values.begin(), values.end()));
+        return builder.Finish().ValueOrDie();
+    }
 }
 
-static void writeSingleColumnParquet(const std::vector<std::uint64_t> &values, const std::string &column_name,
-                                     const std::string &path)
+template <class T>
+void writeSingleColumnParquet(const std::vector<T> &values, const std::string &column_name, const std::string &path)
 {
-    auto array = makeInt64Array(values);
-    auto schema = arrow::schema({arrow::field(column_name, arrow::int64())});
-
+    auto array = makeUInt64Array(values);
+    auto schema = arrow::schema({arrow::field(column_name, arrow::uint64())});
     auto table = arrow::Table::Make(schema, {array});
 
-    std::shared_ptr<arrow::io::FileOutputStream> outfile;
-    auto st = arrow::io::FileOutputStream::Open(path, &outfile);
-    if (!st.ok())
-        throw std::runtime_error("Cannot open output file: " + path + " : " + st.ToString());
+    auto open_result = arrow::io::FileOutputStream::Open(path);
+    if (!open_result.ok())
+        throw std::runtime_error("Open failed: " + open_result.status().message());
+    auto outfile = open_result.ValueOrDie();
 
-    st = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile);
-    if (!st.ok())
-        throw std::runtime_error("Failed to write Parquet file: " + path + " : " + st.ToString());
+    auto write_status = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile);
+    if (!write_status.ok())
+        throw std::runtime_error("Write failed: " + write_status.ToString());
+
+    auto close_status = outfile->Close();
+    if (!close_status.ok())
+        throw std::runtime_error("Close failed: " + close_status.ToString());
 }
 
-template <class K, class O> static void writeGraphToParquet(const CSRGraph<K, O> &g, const std::string &output_file)
+template <class K, class O> void writeGraphToParquet(const CSRGraph<K, O> &g, const std::string &output_file)
 {
     const std::string indices_file = output_file + ".indices.parquet";
     const std::string indptr_file = output_file + ".indptr.parquet";
 
-    writeSingleColumnParquet(g.edges, "indices", indices_file);
-    writeSingleColumnParquet(g.offsets, "indptr", indptr_file);
+    writeSingleColumnParquet<K>(g.edges, "indices", indices_file);
+    writeSingleColumnParquet<O>(g.offsets, "indptr", indptr_file);
 }
 
 template <class K>
@@ -406,7 +420,7 @@ inline void convert_graph_impl(const string &nodes_file, const string &edges_fil
     else if (opts.type == CSR)
     {
         cout << "Writing CSR..." << endl;
-        writeGraphToCSR(g, output_file);
+        writeGraphToParquet(g, output_file);
     }
     cout << "Done." << endl;
 }

@@ -7,6 +7,11 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(_core, m)
 {
+    py::enum_<OUTPUT_TYPE>(m, "OutputType")
+        .value("METIS", OUTPUT_TYPE::METIS)
+        .value("CSR", OUTPUT_TYPE::CSR)
+        .export_values();
+
     py::class_<ConvertOptions>(m, "ConvertOptions")
         .def(py::init<>())
         .def_readwrite("sep", &ConvertOptions::sep)
