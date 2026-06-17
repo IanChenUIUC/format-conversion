@@ -17,6 +17,12 @@
 
 using namespace std;
 
+enum OUTPUT_TYPE
+{
+    METIS,
+    CSR
+};
+
 struct ConvertOptions
 {
     char sep = ',';
@@ -24,7 +30,11 @@ struct ConvertOptions
     bool edge_header = true;
     bool weighted = false;
     bool skip_loops = true;
+    OUTPUT_TYPE type;
 };
+
+void convert_graph(const string &nodes_file, const string &edges_file, const string &output_file,
+                   const ConvertOptions &opts = {});
 
 template <class K = uint32_t, class O = uint64_t> struct CSRGraph
 {
@@ -291,9 +301,10 @@ template <class K, class O> static void writeGraphToMetis(const CSRGraph<K, O> &
     } // free
 
     size_t total = line_off[n];
-    int fd = open(output_file.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
+    string metis_file = output_file + ".metis";
+    int fd = open(metis_file.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
     if (fd == -1)
-        throw runtime_error("Cannot open METIS output: " + output_file);
+        throw runtime_error("Cannot open METIS output: " + metis_file);
     posix_fallocate(fd, 0, (off_t)total);
     char *map_ptr = (char *)mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (map_ptr == MAP_FAILED)
@@ -324,13 +335,52 @@ template <class K, class O> static void writeGraphToMetis(const CSRGraph<K, O> &
     close(fd);
 }
 
-void convert_graph(const string &nodes_file, const string &edges_file, const string &metis_file,
-                   const ConvertOptions &opts = {});
-
-inline void convert_graph(const string &nodes_file, const string &edges_file, const string &metis_file,
-                          const ConvertOptions &opts)
+template <class T> static std::shared_ptr<arrow::Array> makeUInt64Array(const std::vector<T> &values)
 {
-    using K = uint32_t;
+    arrow::UInt64Builder builder;
+    ARROW_THROW_NOT_OK(builder.Reserve(values.size()));
+
+    for (auto x : values)
+        ARROW_THROW_NOT_OK(builder.Append(static_cast<uint64_t>(x)));
+
+    auto result = builder.Finish();
+    if (!result.ok())
+        throw std::runtime_error(result.status().ToString());
+
+    return *result;
+}
+
+static void writeSingleColumnParquet(const std::vector<std::uint64_t> &values, const std::string &column_name,
+                                     const std::string &path)
+{
+    auto array = makeInt64Array(values);
+    auto schema = arrow::schema({arrow::field(column_name, arrow::int64())});
+
+    auto table = arrow::Table::Make(schema, {array});
+
+    std::shared_ptr<arrow::io::FileOutputStream> outfile;
+    auto st = arrow::io::FileOutputStream::Open(path, &outfile);
+    if (!st.ok())
+        throw std::runtime_error("Cannot open output file: " + path + " : " + st.ToString());
+
+    st = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile);
+    if (!st.ok())
+        throw std::runtime_error("Failed to write Parquet file: " + path + " : " + st.ToString());
+}
+
+template <class K, class O> static void writeGraphToParquet(const CSRGraph<K, O> &g, const std::string &output_file)
+{
+    const std::string indices_file = output_file + ".indices.parquet";
+    const std::string indptr_file = output_file + ".indptr.parquet";
+
+    writeSingleColumnParquet(g.edges, "indices", indices_file);
+    writeSingleColumnParquet(g.offsets, "indptr", indptr_file);
+}
+
+template <class K>
+inline void convert_graph_impl(const string &nodes_file, const string &edges_file, const string &output_file,
+                               const ConvertOptions &opts)
+{
     using O = uint64_t;
 
     omp_set_num_threads(omp_get_max_threads());
@@ -348,7 +398,24 @@ inline void convert_graph(const string &nodes_file, const string &edges_file, co
         unordered_map<K, K>().swap(node_map);
     } // free
 
-    cout << "Writing METIS..." << endl;
-    writeGraphToMetis(g, metis_file);
+    if (opts.type == METIS)
+    {
+        cout << "Writing METIS..." << endl;
+        writeGraphToMetis(g, output_file);
+    }
+    else if (opts.type == CSR)
+    {
+        cout << "Writing CSR..." << endl;
+        writeGraphToCSR(g, output_file);
+    }
     cout << "Done." << endl;
+}
+
+inline void convert_graph(const string &nodes_file, const string &edges_file, const string &output_file,
+                          const ConvertOptions &opts)
+{
+    if (opts.type == CSR)
+        convert_graph_impl<uint64_t>(nodes_file, edges_file, output_file, opts);
+    else if (opts.type == METIS)
+        convert_graph_impl<uint32_t>(nodes_file, edges_file, output_file, opts);
 }
