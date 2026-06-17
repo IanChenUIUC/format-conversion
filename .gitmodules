@@ -1,0 +1,6 @@
+[submodule "extern/pybind11"]
+	path = extern/pybind11
+	url = https://github.com/pybind/pybind11
+[submodule "extern/graph-openmp"]
+	path = extern/graph-openmp
+	url = https://github.com/puzzlef/graph-openmp
