@@ -25,6 +25,7 @@ import time
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.feather as pf
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +92,7 @@ def main() -> None:
         print(
             "Usage: python metis_to_csr.py "
             "<input.metis> <indices.parquet> <indptr.parquet>"
+            # "<input.metis> <indices.feather> <indptr.feather>"
         )
         sys.exit(1)
 
@@ -113,13 +115,25 @@ def main() -> None:
         indices_path,
         compression="snappy",
     )
-
     print(f"Writing {indptr_path} ...")
     pq.write_table(
         pa.table({"indptr": pa_indptr}),
         indptr_path,
         compression="snappy",
     )
+
+    # print(f"Writing {indices_path} ...")
+    # pf.write_feather(
+    #     pa.table({"indices": pa_indices}),
+    #     indices_path,
+    #     compression="uncompressed",
+    # )
+    # print(f"Writing {indptr_path} ...")
+    # pf.write_feather(
+    #     pa.table({"indptr": pa_indptr}),
+    #     indptr_path,
+    #     compression="uncompressed",
+    # )
 
 
 if __name__ == "__main__":
