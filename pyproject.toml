@@ -1,5 +1,5 @@
 [project]
-name = "format_conversion"
+name = "format-conversion"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
