@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.13)
 project(format_conversion CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -12,10 +12,16 @@ find_package(Parquet REQUIRED)
 
 add_compile_definitions(OPENMP)
 
-pybind11_add_module(_core src/convert_wrap.cpp)
+pybind11_add_module(convert format_conversion/convert_wrap.cpp)
+pybind11_add_module(partition format_conversion/partition_wrap.cpp)
 
-target_include_directories(_core PRIVATE
-    src                          
+target_include_directories(convert PRIVATE
+    format_conversion
+    extern/graph-openmp/inc      
+)
+
+target_include_directories(partition PRIVATE
+    format_conversion
     extern/graph-openmp/inc      
 )
 
@@ -28,11 +34,16 @@ else()
 				"Please run `git submodule update --init` to fetch the submodule.")
 endif()
 
-target_link_libraries(_core PRIVATE
+target_link_libraries(convert PRIVATE
     OpenMP::OpenMP_CXX
     Arrow::arrow_shared
     Parquet::parquet_shared
+)
+
+target_link_libraries(partition PRIVATE
+    OpenMP::OpenMP_CXX
     tlx
 )
 
-target_compile_options(_core PRIVATE -O3 -march=native -fpermissive)
+target_compile_options(convert PRIVATE -O3 -march=native -fpermissive)
+target_compile_options(partition PRIVATE -O3 -march=native -fpermissive)

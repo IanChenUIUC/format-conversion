@@ -1,3 +1,4 @@
+#include <charconv>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -111,8 +112,10 @@ class NodeRegistry
     inline std::string_view GetNodeId(uint64_t compact_id) const
     {
         std::string_view row = GetRow(compact_id + 1); // +1 skips header row
-        auto columns = tlx::split_view(row, ',');
-        return columns.empty() ? row : columns.front();
+        auto columns = tlx::split_view(",", row);
+        if (columns.empty())
+            return row;
+        return std::string_view(columns.front().data(), columns.front().size());
     }
 
     void ParseLabels(const MemoryMappedFile &labels_file)
@@ -121,21 +124,20 @@ class NodeRegistry
         labels_.assign(num_nodes, -1);
 
         std::string_view label_data(labels_file.data, labels_file.size);
-        auto lines = tlx::split_view(label_data, '\n');
+        auto lines = tlx::split_view("\n", label_data);
 
         uint64_t idx = 0;
-        for (std::string_view line : lines)
+        for (auto line : lines)
         {
             if (idx >= num_nodes)
                 break;
-
-            // Trim whitespace and parse using tlx
-            std::string_view trimmed = tlx::trim(line);
+            auto trimmed = tlx::trim(line);
             if (trimmed.empty())
                 continue;
 
             int32_t val = 0;
-            if (tlx::parse_int32(trimmed, &val))
+            auto result = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), val);
+            if (result.ec == std::errc())
             {
                 labels_[idx++] = val;
                 unique_labels_.insert(val);
@@ -258,15 +260,17 @@ class GraphStreamer
 
                 // Read line and use tlx to process neighbors
                 std::string_view line(p, nl - p);
-                auto neighbors = tlx::split_view(line, ' ');
+                auto neighbors = tlx::split_view(" ", line);
 
-                for (std::string_view token : neighbors)
+                for (auto token : neighbors)
                 {
                     if (token.empty())
-                        continue; // Handles consecutive spaces safely
+                        continue;
 
                     uint64_t v = 0;
-                    if (tlx::parse_uint64(token, &v) && v > 0)
+                    auto result = std::from_chars(token.data(), token.data() + token.size(), v);
+
+                    if (result.ec == std::errc() && v > 0)
                     {
                         uint64_t v_idx = v - 1; // 1-indexed conversion
                         if (u < v_idx && registry_.GetLabel(v_idx) == L_u)

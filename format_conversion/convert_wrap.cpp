@@ -5,7 +5,7 @@
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(_core, m)
+PYBIND11_MODULE(convert, m)
 {
     py::enum_<OUTPUT_TYPE>(m, "OutputType")
         .value("METIS", OUTPUT_TYPE::METIS)

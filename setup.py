@@ -133,7 +133,10 @@ class CMakeBuild(build_ext):
 # logic and declaration, and simpler if you include description/version in a file.
 setup(
     name="format_conversion",
-    ext_modules=[CMakeExtension("format_conversion._core")],
+    ext_modules=[
+        CMakeExtension("format_conversion.convert"),
+        CMakeExtension("format_conversion.partition"),
+    ],
     cmdclass={"build_ext": CMakeBuild},
     packages=["format_conversion"],
     python_requires=">=3.10",
