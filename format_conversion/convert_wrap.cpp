@@ -27,6 +27,6 @@ PYBIND11_MODULE(convert, m)
            const std::filesystem::path &output_file, const ConvertOptions &opts) {
             convert_graph(nodes_file.string(), edges_file.string(), output_file.string(), opts);
         },
-        py::arg("nodes_file"), py::arg("edges_file"), py::arg("output_file"), py::arg("opts") = ConvertOptions{},
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("nodes_file"), py::arg("edges_file"), py::arg("output_file"),
+        py::arg_v("opts", ConvertOptions{}, "ConvertOptions()"), py::call_guard<py::gil_scoped_release>());
 }

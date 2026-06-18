@@ -139,5 +139,6 @@ setup(
     ],
     cmdclass={"build_ext": CMakeBuild},
     packages=["format_conversion"],
+    package_data={"format_conversion": ["*.pyi", "py.typed"]},
     python_requires=">=3.10",
 )

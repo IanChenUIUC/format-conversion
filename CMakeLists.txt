@@ -9,6 +9,7 @@ add_subdirectory(extern/pybind11)
 find_package(OpenMP REQUIRED)
 find_package(Arrow REQUIRED)
 find_package(Parquet REQUIRED)
+find_package(pybind11 REQUIRED)
 
 add_compile_definitions(OPENMP)
 
