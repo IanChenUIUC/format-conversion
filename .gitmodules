@@ -4,3 +4,6 @@
 [submodule "extern/graph-openmp"]
 	path = extern/graph-openmp
 	url = https://github.com/puzzlef/graph-openmp
+[submodule "extern/tlx"]
+	path = extern/tlx
+	url = https://github.com/tlx/tlx

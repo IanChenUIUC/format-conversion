@@ -19,10 +19,20 @@ target_include_directories(_core PRIVATE
     extern/graph-openmp/inc      
 )
 
+# Use TLX as a CMake submodule
+if(EXISTS "${PROJECT_SOURCE_DIR}/extern/tlx/CMakeLists.txt")
+		add_subdirectory(extern/tlx)
+else()
+		message(FATAL_ERROR
+				"Missing TLX library in extern/tlx "
+				"Please run `git submodule update --init` to fetch the submodule.")
+endif()
+
 target_link_libraries(_core PRIVATE
     OpenMP::OpenMP_CXX
     Arrow::arrow_shared
     Parquet::parquet_shared
+    tlx
 )
 
 target_compile_options(_core PRIVATE -O3 -march=native -fpermissive)

@@ -9,40 +9,25 @@ def main() -> None:
     parser.add_argument("input", help="Input edge-list file")
     parser.add_argument("output", help="Output file with one node ID per line")
     parser.add_argument("--sep", default=",", help="Field separator, e.g. ',' or '\\t'")
-    parser.add_argument(
-        "--header",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Whether the input has a header row",
-    )
-    parser.add_argument(
-        "--source-col",
-        default=None,
-        help="Source column name (default: source or column0)",
-    )
-    parser.add_argument(
-        "--target-col",
-        default=None,
-        help="Target column name (default: target or column1)",
-    )
+    parser.add_argument("--header", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
-    source_col = args.source_col or ("source" if args.header else "column0")
-    target_col = args.target_col or ("target" if args.header else "column1")
-
     con = duckdb.connect()
+    con.execute("SET preserve_insertion_order = false;")
+
+    read_edges = f"read_csv({args.input!r}, delim={args.sep!r}, header={str(args.header).lower()}, names=[source, target])"
 
     query = f"""
     COPY (
         WITH edges AS (
             SELECT *
-            FROM read_csv({args.input!r}, delim={args.sep!r}, header=false)
+            FROM {read_edges}
         )
-        SELECT DISTINCT id
+        SELECT DISTINCT node_id
         FROM (
-            SELECT column0 AS id FROM edges
+            SELECT source AS node_id FROM edges
             UNION ALL
-            SELECT column1 AS id FROM edges
+            SELECT target AS node_id FROM edges
         )
     )
     TO {args.output!r}
