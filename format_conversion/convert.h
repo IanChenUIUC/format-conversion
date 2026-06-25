@@ -8,5 +8,5 @@ void convert_graph(const GraphDescriptor &input, const NodeDescriptor *nodes, co
                    EdgesFormat output_fmt)
 {
     DiGraphCsr<K, O> g = buildGraph<K, O>(input, nodes);
-    writeGraph(g, output_path, output_fmt);
+    writeGraph(g, output_path, output_fmt, input.opts);
 }

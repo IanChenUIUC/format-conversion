@@ -39,11 +39,19 @@ class Format:
         return self._read(base)
 
     def as_input(self, base: Path, opts: "ParseOptions | None" = None) -> "GraphDescriptor":
-        """GraphDescriptor for reading this format as convert/partition input."""
+        """GraphDescriptor for reading this format as convert/partition input.
+        Appends the format-specific extension so the path matches what writeGraph wrote."""
         if not _LOADED:
             raise ImportError("C++ module not built")
         o = opts or ParseOptions()
-        return GraphDescriptor(str(base), self._fmt, o)
+        # Must match the extensions appended by writeGraph/writeGraphToX
+        extensions = {
+            EdgesFormat.METIS:        ".metis",
+            EdgesFormat.CSV_EDGELIST: ".csv",
+            EdgesFormat.CSR_PARQUET:  ".indices.parquet",
+        }
+        path = str(base) + extensions.get(self._fmt, "")
+        return GraphDescriptor(path, self._fmt, o)
 
     def __repr__(self) -> str:
         return f"Format({self.name})"

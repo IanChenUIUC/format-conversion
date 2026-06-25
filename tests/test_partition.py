@@ -35,6 +35,7 @@ FORMAT_IDS     = list(FORMATS.keys())
 
 def _csv_in(g: dict, **kw) -> GraphDescriptor:
     opts = ParseOptions()
+    opts.skip_rows = 1  # fixture edge files always have a src,dst header
     for k, v in kw.items():
         setattr(opts, k, v)
     return GraphDescriptor(str(g["edges"]), EdgesFormat.CSV_EDGELIST, opts)

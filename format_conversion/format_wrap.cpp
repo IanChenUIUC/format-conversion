@@ -64,12 +64,13 @@ PYBIND11_MODULE(format, m)
     m.def(
         "partition",
         [](std::shared_ptr<GraphDescriptor> input, std::shared_ptr<NodeDescriptor> nodes,
-           std::filesystem::path labels_path, ParseOptions label_opts, std::filesystem::path output_dir,
-           EdgesFormat output_fmt, size_t batch_size) {
+           std::filesystem::path labels_path, std::filesystem::path output_dir,
+           EdgesFormat output_fmt, ParseOptions label_opts, size_t batch_size) {
             partition_graph(*input, nodes.get(), labels_path.string(), label_opts, output_dir.string(), output_fmt,
                             batch_size);
         },
         py::arg("input"), py::arg("nodes") = py::none(), py::arg("labels_path"),
-        py::arg_v("label_opts", ParseOptions{}, "ParseOptions()"), py::arg("output_dir"), py::arg("output_fmt"),
+        py::arg("output_dir"), py::arg("output_fmt"),
+        py::arg_v("label_opts", ParseOptions{}, "ParseOptions()"),
         py::arg("batch_size") = std::numeric_limits<size_t>::max(), py::call_guard<py::gil_scoped_release>());
 }

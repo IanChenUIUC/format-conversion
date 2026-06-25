@@ -4,6 +4,7 @@
 
 #include <charconv>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,18 +36,13 @@ struct ParseOptions
 };
 
 // ─── Descriptors ─────────────────────────────────────────────────────────────
-//
-// Own their MmapFile (RAII). Exposed to Python via shared_ptr holders so
-// pybind11 never tries to copy them.
 
 struct NodeDescriptor
 {
     MmapFile mmap;
     ParseOptions opts;
 
-    NodeDescriptor(const std::string &path, ParseOptions opts = {}) : mmap(path), opts(std::move(opts))
-    {
-    }
+    NodeDescriptor(const std::string &path, ParseOptions opts = {}) : mmap(path), opts(std::move(opts)) {}
 };
 
 struct GraphDescriptor
@@ -63,52 +59,37 @@ struct GraphDescriptor
 
 // ─── NodeMap ─────────────────────────────────────────────────────────────────
 //
-// Wraps either dense (identity) or sparse (robin_hood) mode.
-// One bool branch per lookup — acceptable given that alternatives complicate
-// all call sites.  In dense mode no heap memory is allocated.
+// Two modes, selected at construction:
+//   dense  — identity mapping (no heap memory). Used when no node file is given.
+//   sparse — robin_hood flat map built from a NodeDescriptor.
 //
-// find(raw_id) returns the compact ID, or size() as a sentinel if not found.
+// find(raw_id) returns the compact ID, or INVALID_ID if not found (sparse mode).
+// In dense mode, INVALID_ID is never returned.
 
 template <class K = uint32_t> struct NodeMap
 {
+    static constexpr K INVALID_ID = std::numeric_limits<K>::max();
+
     bool dense;
     K N = 0;
     robin_hood::unordered_flat_map<K, K> map; // empty in dense mode
 
-    // Dense: raw IDs are already 0-indexed compact IDs.
-    explicit NodeMap(K n) : dense(true), N(n)
-    {
-    }
+    explicit NodeMap(K n) : dense(true), N(n) {}  // Dense: raw IDs are already 0-indexed.
+    NodeMap() : dense(false), N(0) {}             // Sparse: caller populates map and N.
 
-    // Sparse: caller populates map and sets N.
-    NodeMap() : dense(false), N(0)
-    {
-    }
+    K size() const { return N; }
+    bool isDense() const { return dense; }
 
-    K size() const
-    {
-        return N;
-    }
-    bool isDense() const
-    {
-        return dense;
-    }
-
-    // Returns compact ID, or N (sentinel for "not found").
     K find(K raw_id) const
     {
         if (dense)
             return raw_id;
         auto it = map.find(raw_id);
-        return it != map.end() ? it->second : N;
+        return it != map.end() ? it->second : INVALID_ID;
     }
 };
 
 // ─── buildNodeMap ─────────────────────────────────────────────────────────────
-//
-// Scans the node CSV (mmap'd), builds sparse NodeMap (raw_id → compact_id).
-// Respects skip_rows and comment_char from opts.
-// Full implementation here; used from Milestone 4 onward.
 
 template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
 {
@@ -116,7 +97,6 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
     const char *p = nd.mmap.data;
     const char *end = p + nd.mmap.size;
 
-    // Skip header/preamble rows.
     for (size_t i = 0; i < nd.opts.skip_rows && p < end; ++i)
     {
         const char *nl = (const char *)memchr(p, '\n', end - p);
@@ -141,13 +121,11 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
             p = nl ? nl + 1 : end;
             continue;
         }
-
         K id = 0;
         auto [next, ec] = std::from_chars(p, end, id);
         if (ec == std::errc{})
             if (nm.map.emplace(id, compact).second)
                 ++compact;
-
         const char *nl = (const char *)memchr(p, '\n', end - p);
         p = nl ? nl + 1 : end;
     }
@@ -155,10 +133,119 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
     return nm;
 }
 
+// ─── buildCSRFromCSVST ────────────────────────────────────────────────────────
+//
+// Single-threaded two-pass CSR build from a CSV edge list.
+//
+// Pass 1 — degree count + N discovery (one combined scan):
+//   For each edge (u, v): grow degree[] if needed (dense mode only, since N is
+//   unknown until we see the max ID), then ++degree[u] and ++degree[v].
+//   In sparse mode N is already fixed from the node file so no resize occurs.
+//
+// Pass 2 — scatter:
+//   For each edge (u, v): write v into edgeKeys at write_pos[u]++ and
+//   u into edgeKeys at write_pos[v]++.
+//
+// Note: self-loops (u == v) are always skipped for undirected CSR.
+
+template <class K = uint32_t, class O = uint64_t>
+DiGraphCsr<K, O> buildCSRFromCSVST(std::string_view data, NodeMap<K> &nm, const ParseOptions &opts)
+{
+    std::vector<K> degree;
+
+    // Helper: apply base_index, validate, return compact IDs via nm.
+    // Invokes cb(u, v) only for valid, non-loop edges.
+    auto forEachEdge = [&](auto cb)
+    {
+        readEdgelistFormatDoChecked<false, 0>(data, /*symmetric=*/false, [&](int64_t ri, int64_t rj, double)
+        {
+            auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
+            if (bi < opts.base_index || bj < opts.base_index)
+                return;
+            K u = nm.find(static_cast<K>(bi - opts.base_index));
+            K v = nm.find(static_cast<K>(bj - opts.base_index));
+            if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
+                return;
+            if (u == v)
+                return; // skip self-loops
+            cb(u, v);
+        });
+    };
+
+    // ── Pass 1: count degrees ─────────────────────────────────────────────────
+    forEachEdge([&](K u, K v)
+    {
+        K maxuv = std::max(u, v);
+        if (maxuv >= static_cast<K>(degree.size()))
+            degree.resize(static_cast<size_t>(maxuv) + 1, K{});
+        ++degree[u];
+        ++degree[v];
+    });
+
+    K N = static_cast<K>(degree.size());
+    if (nm.dense)
+        nm.N = N; // update now that we know the actual N
+
+    // ── Prefix sum → offsets ──────────────────────────────────────────────────
+    DiGraphCsr<K, O> g;
+    g.offsets.resize(N + 1);
+    O total = O{};
+    for (K u = 0; u < N; ++u)
+    {
+        g.offsets[u] = total;
+        total += degree[u];
+    }
+    g.offsets[N] = total;
+    degree.clear();
+    degree.shrink_to_fit();
+
+    // ── Pass 2: scatter edges ─────────────────────────────────────────────────
+    g.edgeKeys.resize(static_cast<size_t>(total));
+    std::vector<O> write_pos(g.offsets.begin(), g.offsets.begin() + N);
+
+    forEachEdge([&](K u, K v)
+    {
+        g.edgeKeys[write_pos[u]++] = v;
+        g.edgeKeys[write_pos[v]++] = u;
+    });
+
+    return g;
+}
+
 // ─── buildGraph ──────────────────────────────────────────────────────────────
 
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
 {
-    throw std::runtime_error("buildGraph: not implemented");
+    // Strip leading rows (header, comments) from the edge data.
+    std::string_view data = gd.mmap.view();
+    for (size_t i = 0; i < gd.opts.skip_rows && !data.empty(); ++i)
+    {
+        auto nl = data.find('\n');
+        if (nl == std::string_view::npos)
+        {
+            data = {};
+            break;
+        }
+        data = data.substr(nl + 1);
+    }
+
+    switch (gd.fmt)
+    {
+        case CSV_EDGELIST:
+        {
+            // nd == nullptr → dense (identity) mode, N discovered during scan.
+            // nd != nullptr → sparse mode, N comes from the node map.
+            NodeMap<K> nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
+            if (gd.opts.num_threads <= 1)
+                return buildCSRFromCSVST<K, O>(data, nm, gd.opts);
+            throw std::runtime_error("buildGraph: multi-threaded CSV not yet implemented");
+        }
+        case METIS:
+            throw std::runtime_error("buildGraph: METIS input not yet implemented");
+        case CSR_PARQUET:
+            throw std::runtime_error("buildGraph: CSR_PARQUET input not yet implemented");
+        default:
+            throw std::runtime_error("buildGraph: unknown format");
+    }
 }
