@@ -7,3 +7,6 @@
 [submodule "extern/graph-csr-openmp"]
 	path = extern/graph-csr-openmp
 	url = https://github.com/IanChenUIUC/graph-csr-openmp
+[submodule "extern/robin-hood-hashing"]
+	path = extern/robin-hood-hashing
+	url = https://github.com/martinus/robin-hood-hashing

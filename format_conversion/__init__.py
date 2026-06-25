@@ -1,4 +1,4 @@
-from .convert import convert, ConvertOptions, OutputType
-from .partition import partition
+from .convert import convert, FormatOptions, OutputType
+# from .partition import partition
 
-__all__ = ["partition", "convert", "ConvertOptions", "OutputType"]
+__all__ = ["convert", "FormatOptions", "OutputType"]

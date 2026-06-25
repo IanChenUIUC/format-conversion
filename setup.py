@@ -135,7 +135,7 @@ setup(
     name="format_conversion",
     ext_modules=[
         CMakeExtension("format_conversion.convert"),
-        CMakeExtension("format_conversion.partition"),
+        # CMakeExtension("format_conversion.partition"),
     ],
     cmdclass={"build_ext": CMakeBuild},
     packages=["format_conversion"],
