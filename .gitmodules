@@ -1,9 +1,9 @@
 [submodule "extern/pybind11"]
 	path = extern/pybind11
 	url = https://github.com/pybind/pybind11
-[submodule "extern/graph-openmp"]
-	path = extern/graph-openmp
-	url = https://github.com/puzzlef/graph-openmp
 [submodule "extern/tlx"]
 	path = extern/tlx
 	url = https://github.com/tlx/tlx
+[submodule "extern/graph-csr-openmp"]
+	path = extern/graph-csr-openmp
+	url = https://github.com/IanChenUIUC/graph-csr-openmp
