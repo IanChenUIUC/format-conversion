@@ -52,7 +52,7 @@ struct MmapFile
     {
         o.data = nullptr;
         o.size = 0;
-        o.fd   = -1;
+        o.fd = -1;
     }
 
     std::string_view view() const

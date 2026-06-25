@@ -16,16 +16,13 @@
 #include <parquet/arrow/writer.h>
 
 // ─── numDigits ───────────────────────────────────────────────────────────────
-// Branchless decimal digit count for n >= 1.
-// 1233/4096 ≈ log10(2); correction term handles boundary values exactly.
-// Compiles to: lzcnt, imul, shr, cmp, add.
 
 inline uint32_t numDigits(uint32_t n)
 {
     static constexpr uint32_t pow10[] = {1u,      10u,      100u,      1000u,      10000u,
                                          100000u, 1000000u, 10000000u, 100000000u, 1000000000u};
     uint32_t t = (std::bit_width(n) * 1233u) >> 12;
-    return t + (n >= pow10[t]);
+    return t + (n >= pow10[t]); // log approximation can be off by one
 }
 
 // ─── writeGraphToMetis ───────────────────────────────────────────────────────
@@ -114,7 +111,6 @@ template <class K, class O> void writeGraphToParquet(const DiGraphCsr<K, O> &g, 
 }
 
 // ─── writeGraph ──────────────────────────────────────────────────────────────
-// Milestone 2 (METIS), Milestone 5 (Parquet, CSV).
 
 template <class K, class O> void writeGraph(const DiGraphCsr<K, O> &g, const std::string &output_path, EdgesFormat fmt)
 {
