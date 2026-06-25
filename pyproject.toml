@@ -5,8 +5,19 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "pyarrow>=24.0.0",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [build-system]
-requires = ["setuptools>=61.0.0", "wheel", "pybind11>=2.12"]
+requires = ["setuptools>=61.0.0", "wheel", "pybind11>=2.12", "pyarrow>=24.0.0"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "pybind11-stubgen>=2.5.5",
+    "pytest>=9.1.1",
+    "setuptools>=82.0.1",
+]

@@ -4,183 +4,134 @@
 
 #include <charconv>
 #include <cstring>
-#include <omp.h>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <Graph.hxx>
 #include <io.hxx>
 #include <robin_hood.h>
 
-template <class K = uint32_t> using NodeMap = robin_hood::unordered_flat_map<K, K>;
+// ─── Format enum ─────────────────────────────────────────────────────────────
 
-enum EdgesFormat
-{
-    METIS,
-    CSR_PARQUET,
-    CSV_EDGELIST,
+enum EdgesFormat { CSV_EDGELIST, METIS, CSR_PARQUET };
+
+// ─── ParseOptions ────────────────────────────────────────────────────────────
+
+struct ParseOptions {
+    char     sep          = ',';
+    char     comment_char = '#';
+    size_t   skip_rows    = 0;
+    size_t   num_threads  = 1;
+    uint64_t base_index   = 0;
+    size_t   id_column    = 0;
+    size_t   label_column = 0;
 };
 
-struct ParseOptions
-{
-    size_t skip_edge_rows = 0; // include for any comments
-    bool node_header = true;
-    bool skip_loops = true;
-    char sep = ',';
-};
-
-template <class K, class O>
-DiGraphCsr<K, O> buildGraph(const std::string &edges_file, const std::string &nodes_file, const ParseOptions &opts,
-                            EdgesFormat input_fmt)
-{
-    // TODO
-}
-
-// ─── buildNodeMap ────────────────────────────────────────────────────────────
+// ─── Descriptors ─────────────────────────────────────────────────────────────
 //
-// Mmaps the node CSV and inserts the first-column integer of each data row
-// into node_map (raw_id -> compact_id). Returns N = number of distinct nodes.
+// Own their MmapFile (RAII). Exposed to Python via shared_ptr holders so
+// pybind11 never tries to copy them.
+
+struct NodeDescriptor {
+    MmapFile     mmap;
+    ParseOptions opts;
+
+    NodeDescriptor(const std::string& path, ParseOptions opts = {})
+        : mmap(path), opts(std::move(opts)) {}
+};
+
+struct GraphDescriptor {
+    MmapFile     mmap;
+    EdgesFormat  fmt;
+    ParseOptions opts;
+
+    GraphDescriptor(const std::string& path, EdgesFormat fmt, ParseOptions opts = {})
+        : mmap(path), fmt(fmt), opts(std::move(opts)) {}
+};
+
+// ─── NodeMap ─────────────────────────────────────────────────────────────────
+//
+// Wraps either dense (identity) or sparse (robin_hood) mode.
+// One bool branch per lookup — acceptable given that alternatives complicate
+// all call sites.  In dense mode no heap memory is allocated.
+//
+// find(raw_id) returns the compact ID, or size() as a sentinel if not found.
 
 template <class K = uint32_t>
-size_t buildNodeMap(const std::string &path, const ParseOptions &opts, NodeMap<K> &node_map)
-{
-    MmapFile mf(path);
-    const char *p = mf.data;
-    const char *end = p + mf.size;
+struct NodeMap {
+    bool                                 dense;
+    K                                    N = 0;
+    robin_hood::unordered_flat_map<K, K> map;  // empty in dense mode
 
-    if (opts.node_header)
-    {
-        const char *nl = (const char *)memchr(p, '\n', end - p);
+    // Dense: raw IDs are already 0-indexed compact IDs.
+    explicit NodeMap(K n) : dense(true), N(n) {}
+
+    // Sparse: caller populates map and sets N.
+    NodeMap() : dense(false), N(0) {}
+
+    K    size()           const { return N; }
+    bool isDense()        const { return dense; }
+
+    // Returns compact ID, or N (sentinel for "not found").
+    K find(K raw_id) const {
+        if (dense) return raw_id;
+        auto it = map.find(raw_id);
+        return it != map.end() ? it->second : N;
+    }
+};
+
+// ─── buildNodeMap ─────────────────────────────────────────────────────────────
+//
+// Scans the node CSV (mmap'd), builds sparse NodeMap (raw_id → compact_id).
+// Respects skip_rows and comment_char from opts.
+// Full implementation here; used from Milestone 4 onward.
+
+template <class K = uint32_t>
+NodeMap<K> buildNodeMap(const NodeDescriptor& nd)
+{
+    NodeMap<K>   nm;
+    const char*  p   = nd.mmap.data;
+    const char*  end = p + nd.mmap.size;
+
+    // Skip header/preamble rows.
+    for (size_t i = 0; i < nd.opts.skip_rows && p < end; ++i) {
+        const char* nl = (const char*)memchr(p, '\n', end - p);
         p = nl ? nl + 1 : end;
     }
 
-    size_t N = 0;
-    while (p < end)
-    {
-        while (p < end && (*p == ' ' || *p == '\t'))
-            ++p;
-        if (p >= end)
-            break;
-        if (*p == '\n')
-        {
-            ++p;
+    K compact = 0;
+    while (p < end) {
+        while (p < end && (*p == ' ' || *p == '\t')) ++p;
+        if (p >= end) break;
+        if (*p == '\n')         { ++p; continue; }
+        if (*p == nd.opts.comment_char) {
+            const char* nl = (const char*)memchr(p, '\n', end - p);
+            p = nl ? nl + 1 : end;
             continue;
         }
 
         K id = 0;
         auto [next, ec] = std::from_chars(p, end, id);
         if (ec == std::errc{})
-            if (node_map.emplace(id, (K)N).second)
-                ++N;
+            if (nm.map.emplace(id, compact).second)
+                ++compact;
 
-        const char *nl = (const char *)memchr(p, '\n', end - p);
+        const char* nl = (const char*)memchr(p, '\n', end - p);
         p = nl ? nl + 1 : end;
     }
-    return N;
+    nm.N = compact;
+    return nm;
 }
 
-// ─── buildCSRFromEdges ───────────────────────────────────────────────────────
+// ─── buildGraph ──────────────────────────────────────────────────────────────
 //
-// Two-pass parallel CSR construction over the edge CSV.
-//
-// Pass 1 — degree count with P=4 partitioned arrays (graph-csr-openmp
-//           PARTITIONS pattern): reduces atomic contention on hub nodes 4×.
-// Pass 2 — atomic-capture scatter into the pre-allocated edgeKeys array.
-//
-// Parsing is delegated to graph-csr-openmp's readEdgelistFormatBlock +
-// readEdgelistFormatDoUnchecked, which handle comma-separated integer IDs
-// by skipping non-digit characters to find each next integer.
+// Milestone 2: CSV_EDGELIST + dense/sparse NodeMap → DiGraphCsr.
+// Milestones 5-6: METIS and CSR_PARQUET inputs.
 
 template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildGraphFromEdges(const std::string &edges_file, const NodeMap<K> &node_map,
-                                     const ParseOptions &opts)
+DiGraphCsr<K, O> buildGraph(const GraphDescriptor& gd,
+                             const NodeDescriptor*  nd)
 {
-    MmapFile mf(edges_file);
-    std::string_view data = mf.view();
-
-    for (size_t i = 0; i < opts.skip_edge_rows; ++i)
-    {
-        const char *nl = (const char *)memchr(mf.data, '\n', mf.size);
-        size_t skip = nl ? (size_t)(nl + 1 - mf.data) : mf.size;
-        data = data.substr(skip);
-    }
-
-    constexpr int P = 4;
-    const size_t BLOCK = 256 * 1024;
-
-    size_t N = node_map.size();
-    std::vector<std::vector<uint32_t>> pdeg(P, std::vector<uint32_t>(N, 0));
-
-// ── Pass 1: count degrees ──
-#pragma omp parallel
-    {
-        int p = omp_get_thread_num() % P;
-#pragma omp for schedule(dynamic) nowait
-        for (size_t b = 0; b < data.size(); b += BLOCK)
-        {
-            std::string_view block = readEdgelistFormatBlock(data, b, BLOCK);
-            readEdgelistFormatDoUnchecked<false, 0>(block, /*symmetric=*/false, [&](uint64_t ru, uint64_t rv, double) {
-                auto iu = node_map.find((K)ru);
-                auto iv = node_map.find((K)rv);
-                if (iu == node_map.end() || iv == node_map.end())
-                    return;
-                K u = iu->second, v = iv->second;
-                if (opts.skip_loops && u == v)
-                    return;
-#pragma omp atomic
-                ++pdeg[p][u];
-#pragma omp atomic
-                ++pdeg[p][v];
-            });
-        }
-    }
-
-#pragma omp parallel for schedule(static)
-    for (size_t u = 0; u < N; ++u)
-        for (int p = 1; p < P; ++p)
-            pdeg[0][u] += pdeg[p][u];
-    for (int p = 1; p < P; ++p)
-        std::vector<uint32_t>().swap(pdeg[p]);
-
-    // ── Exclusive prefix sum → offsets ──
-    DiGraphCsr<K, O> g;
-    g.offsets.resize(N + 1);
-    O total = 0;
-    for (size_t u = 0; u < N; ++u)
-    {
-        g.offsets[u] = total;
-        total += pdeg[0][u];
-    }
-    g.offsets[N] = total;
-    std::vector<uint32_t>().swap(pdeg[0]);
-
-    g.edgeKeys.resize((size_t)total);
-    std::vector<O> write_pos(g.offsets.begin(), g.offsets.begin() + N);
-
-// ── Pass 2: scatter ──
-#pragma omp parallel
-    {
-#pragma omp for schedule(dynamic) nowait
-        for (size_t b = 0; b < data.size(); b += BLOCK)
-        {
-            std::string_view block = readEdgelistFormatBlock(data, b, BLOCK);
-            readEdgelistFormatDoUnchecked<false, 0>(block, /*symmetric=*/false, [&](uint64_t ru, uint64_t rv, double) {
-                auto iu = node_map.find((K)ru);
-                auto iv = node_map.find((K)rv);
-                if (iu == node_map.end() || iv == node_map.end())
-                    return;
-                K u = iu->second, v = iv->second;
-                if (opts.skip_loops && u == v)
-                    return;
-                O su, sv;
-#pragma omp atomic capture
-                su = write_pos[u]++;
-#pragma omp atomic capture
-                sv = write_pos[v]++;
-                g.edgeKeys[su] = v;
-                g.edgeKeys[sv] = u;
-            });
-        }
-    }
-
-    return g;
+    throw std::runtime_error("buildGraph: not implemented");
 }

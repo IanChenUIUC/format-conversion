@@ -1,4 +1,17 @@
-from .convert import convert, FormatOptions, OutputType
-# from .partition import partition
+from .format import (
+    EdgesFormat,
+    ParseOptions,
+    NodeDescriptor,
+    GraphDescriptor,
+    convert,
+    partition,
+)
 
-__all__ = ["convert", "FormatOptions", "OutputType"]
+__all__ = [
+    "EdgesFormat",
+    "ParseOptions",
+    "NodeDescriptor",
+    "GraphDescriptor",
+    "convert",
+    "partition",
+]

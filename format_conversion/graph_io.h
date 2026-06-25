@@ -48,6 +48,13 @@ struct MmapFile
     MmapFile(const MmapFile &) = delete;
     MmapFile &operator=(const MmapFile &) = delete;
 
+    MmapFile(MmapFile &&o) noexcept : data(o.data), size(o.size), fd(o.fd)
+    {
+        o.data = nullptr;
+        o.size = 0;
+        o.fd   = -1;
+    }
+
     std::string_view view() const
     {
         return {data, size};
