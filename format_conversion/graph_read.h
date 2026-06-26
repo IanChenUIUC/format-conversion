@@ -13,6 +13,10 @@
 #include <io.hxx>
 #include <robin_hood.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 // ─── Format enum ─────────────────────────────────────────────────────────────
 
 enum EdgesFormat
@@ -61,33 +65,54 @@ struct GraphDescriptor
 
 // ─── NodeMap ─────────────────────────────────────────────────────────────────
 //
-// Two modes, selected at construction:
-//   dense  — identity mapping (no heap memory). Used when no node file is given.
-//   sparse — robin_hood flat map built from a NodeDescriptor.
+// Maps a raw node id (as it appears in the edge/node files, after subtracting
+// opts.base_index) to a compact id in [0, N). Three representations, chosen at
+// build time by how dense the raw id space is:
 //
-// find(raw_id) returns the compact ID, or INVALID_ID if not found (sparse mode).
-// In dense mode, INVALID_ID is never returned.
+//   Dense — identity. No node file given; the raw id *is* the compact id and N
+//           is discovered while scanning edges. No memory, no lookup.
+//   Array — flat remap[]. Raw ids are "mostly compact but offset": they span a
+//           range only modestly larger than N. remap[raw - min_id] = compact,
+//           with INVALID_ID marking gaps. One subtract + one load per lookup.
+//   Hash  — robin_hood map. Fallback when the raw id span dwarfs N (e.g. true
+//           64-bit ids), where an array would waste too much memory.
+//
+// find(raw) returns the compact id, or INVALID_ID if raw is unknown.
+// The Array/Hash representations are built from a NodeDescriptor; the compact id
+// equals the row's position in the node file (NOT sorted — file order is kept).
 
 template <class K = uint32_t> struct NodeMap
 {
     static constexpr K INVALID_ID = std::numeric_limits<K>::max();
 
-    bool dense;
-    K N = 0;
-    robin_hood::unordered_flat_map<K, K> map; // empty in dense mode
+    enum class Mode
+    {
+        Dense,
+        Array,
+        Hash
+    };
 
-    // Borrowed from the NodeDescriptor's MmapFile — NodeDescriptor must outlive NodeMap.
-    // Empty in dense mode (no file).
-    std::vector<size_t> line_offsets; // line_offsets[compact_id] = byte offset of that row
+    Mode mode = Mode::Hash;
+    K N = 0;
+
+    // Array mode.
+    K min_id = 0;
+    std::vector<K> remap; // remap[raw - min_id] = compact, or INVALID_ID for a gap
+
+    // Hash mode.
+    robin_hood::unordered_flat_map<K, K> map;
+
+    // Borrowed from the NodeDescriptor's MmapFile (must outlive this NodeMap).
+    // line_offsets[compact] = byte offset of that node's row; used by getRow.
+    // Empty in dense mode.
+    std::vector<size_t> line_offsets;
     const char *file_data = nullptr;
     size_t file_size = 0;
 
-    explicit NodeMap(K n) : dense(true), N(n)
+    NodeMap() = default; // Hash mode, empty (also the METIS/parquet placeholder).
+    explicit NodeMap(K n) : mode(Mode::Dense), N(n)
     {
-    } // Dense: raw IDs are already 0-indexed.
-    NodeMap() : dense(false), N(0)
-    {
-    } // Sparse: caller populates map and N.
+    }
 
     K size() const
     {
@@ -95,19 +120,31 @@ template <class K = uint32_t> struct NodeMap
     }
     bool isDense() const
     {
-        return dense;
+        return mode == Mode::Dense;
     }
 
-    K find(K raw_id) const
+    K find(K raw) const
     {
-        if (dense)
-            return raw_id;
-        auto it = map.find(raw_id);
-        return it != map.end() ? it->second : INVALID_ID;
+        switch (mode)
+        {
+        case Mode::Dense:
+            return raw;
+        case Mode::Array: {
+            if (raw < min_id)
+                return INVALID_ID;
+            K off = static_cast<K>(raw - min_id);
+            return off < remap.size() ? remap[off] : INVALID_ID;
+        }
+        case Mode::Hash: {
+            auto it = map.find(raw);
+            return it != map.end() ? it->second : INVALID_ID;
+        }
+        }
+        return INVALID_ID; // unreachable
     }
 
-    // Return the raw CSV row for a compact ID as a string_view into the mmap'd file.
-    // Returns an empty view in dense mode or if the ID is out of range.
+    // Return the verbatim node-file row for a compact id (no trailing newline),
+    // as a string_view into the mmap'd file. Empty in dense mode / out of range.
     std::string_view getRow(K compact_id) const
     {
         if (!file_data || compact_id >= static_cast<K>(line_offsets.size()))
@@ -123,26 +160,43 @@ template <class K = uint32_t> struct NodeMap
 };
 
 // ─── buildNodeMap ─────────────────────────────────────────────────────────────
+//
+// Scan a node file once, assigning compact ids in file order. Then pick Array or
+// Hash based on how dense the raw id space is: Array when the id span is within
+// MAX_REMAP_SPAN_RATIO × N (cheap, cache-friendly), Hash otherwise.
 
 template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
 {
+    // Array mode is used while  (max_id - min_id + 1) <= ratio * N. At 4x the
+    // remap array is <= 16 bytes/node — still far smaller than the edge arrays —
+    // so we keep it generous and only fall back to Hash for truly sparse ids.
+    static constexpr double MAX_REMAP_SPAN_RATIO = 4.0;
+
     NodeMap<K> nm;
     nm.file_data = nd.mmap.data;
     nm.file_size = nd.mmap.size;
 
-    const char *p = nd.mmap.data;
+    const char *base = nd.mmap.data;
+    const char *p = base;
     const char *end = p + nd.mmap.size;
+    const uint64_t bias = nd.opts.base_index;
 
-    for (size_t i = 0; i < nd.opts.skip_rows && p < end; ++i)
-    {
+    auto skipLine = [&] {
         const char *nl = (const char *)memchr(p, '\n', end - p);
         p = nl ? nl + 1 : end;
-    }
+    };
 
-    K compact = 0;
+    for (size_t i = 0; i < nd.opts.skip_rows && p < end; ++i)
+        skipLine();
+
+    // Single pass: collect normalised ids + row offsets in file order.
+    std::vector<K> ids;
+    bool have_any = false;
+    K min_id = 0, max_id = 0;
+
     while (p < end)
     {
-        const char *line_start = p; // save before stripping whitespace, for getRow
+        const char *line_start = p;
         while (p < end && (*p == ' ' || *p == '\t'))
             ++p;
         if (p >= end)
@@ -154,223 +208,205 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
         }
         if (*p == nd.opts.comment_char)
         {
-            const char *nl = (const char *)memchr(p, '\n', end - p);
-            p = nl ? nl + 1 : end;
+            skipLine();
             continue;
         }
-        K id = 0;
-        auto [next, ec] = std::from_chars(p, end, id);
-        if (ec == std::errc{})
-            if (nm.map.emplace(id, compact).second)
+        uint64_t raw = 0;
+        auto [next, ec] = std::from_chars(p, end, raw);
+        if (ec == std::errc{} && raw >= bias)
+        {
+            K id = static_cast<K>(raw - bias);
+            ids.push_back(id);
+            nm.line_offsets.push_back(static_cast<size_t>(line_start - base));
+            if (!have_any)
             {
-                nm.line_offsets.push_back(static_cast<size_t>(line_start - nd.mmap.data));
-                ++compact;
+                min_id = max_id = id;
+                have_any = true;
             }
-        const char *nl = (const char *)memchr(p, '\n', end - p);
-        p = nl ? nl + 1 : end;
+            else
+            {
+                min_id = std::min(min_id, id);
+                max_id = std::max(max_id, id);
+            }
+        }
+        p = next;
+        skipLine();
     }
-    nm.N = compact;
+
+    nm.N = static_cast<K>(ids.size());
+
+    if (!have_any)
+    {
+        nm.mode = NodeMap<K>::Mode::Hash; // empty graph; find() always misses
+        return nm;
+    }
+
+    const uint64_t span = static_cast<uint64_t>(max_id) - static_cast<uint64_t>(min_id) + 1;
+    const bool use_array = static_cast<double>(span) <= MAX_REMAP_SPAN_RATIO * static_cast<double>(nm.N);
+
+    if (use_array)
+    {
+        nm.mode = NodeMap<K>::Mode::Array;
+        nm.min_id = min_id;
+        nm.remap.assign(static_cast<size_t>(span), NodeMap<K>::INVALID_ID);
+        for (K compact = 0; compact < nm.N; ++compact)
+            nm.remap[static_cast<size_t>(ids[compact]) - min_id] = compact;
+    }
+    else
+    {
+        nm.mode = NodeMap<K>::Mode::Hash;
+        nm.map.reserve(nm.N);
+        for (K compact = 0; compact < nm.N; ++compact)
+            nm.map.emplace(ids[compact], compact);
+    }
     return nm;
 }
 
-// ─── buildCSRFromCSVST ────────────────────────────────────────────────────────
+// ─── forEachValidEdge ─────────────────────────────────────────────────────────
 //
-// Single-threaded two-pass CSR build from a CSV edge list.
-//
-// Pass 1 — degree count + N discovery (one combined scan):
-//   For each edge (u, v): grow degree[] if needed (dense mode only, since N is
-//   unknown until we see the max ID), then ++degree[u] and ++degree[v].
-//   In sparse mode N is already fixed from the node file so no resize occurs.
-//
-// Pass 2 — scatter:
-//   For each edge (u, v): write v into edgeKeys at write_pos[u]++ and
-//   u into edgeKeys at write_pos[v]++.
-//
-// Note: self-loops (u == v) are always skipped for undirected CSR.
+// The single per-edge parse+validate hot path, shared by every CSR build pass.
+// For each line in `blk` it parses (u_raw, v_raw), applies base_index, maps both
+// endpoints through the NodeMap, drops unknown endpoints and self-loops, and
+// invokes cb(u_compact, v_compact). The GVEL parser hardcodes ',' as the field
+// separator and '#'/'%' as comment markers.
 
-template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildCSRFromCSVST(std::string_view data, NodeMap<K> &nm, const ParseOptions &opts)
+template <class K, class Fn>
+inline void forEachValidEdge(std::string_view blk, const NodeMap<K> &nm, const ParseOptions &opts, Fn &&cb)
 {
-    // The underlying parser natively handles '#' and '%' as comment characters.
-    // Custom comment chars require a different parsing strategy.
-    if (opts.comment_char != '#' && opts.comment_char != '%')
-        throw std::runtime_error("comment_char: not yet implemented for chars other than '#' and '%'");
-
-    std::vector<K> degree;
-
-    // Helper: apply base_index, validate, return compact IDs via nm.
-    // Invokes cb(u, v) only for valid, non-loop edges.
-    auto forEachEdge = [&](auto cb) {
-        readEdgelistFormatDoChecked<false, 0>(data, /*symmetric=*/false, [&](int64_t ri, int64_t rj, double) {
-            auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
-            if (bi < opts.base_index || bj < opts.base_index)
-                return;
-            K u = nm.find(static_cast<K>(bi - opts.base_index));
-            K v = nm.find(static_cast<K>(bj - opts.base_index));
-            if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
-                return;
-            if (u == v)
-                return; // skip self-loops
-            cb(u, v);
-        });
-    };
-
-    // ── Pass 1: count degrees ─────────────────────────────────────────────────
-    forEachEdge([&](K u, K v) {
-        K maxuv = std::max(u, v);
-        if (maxuv >= static_cast<K>(degree.size()))
-            degree.resize(static_cast<size_t>(maxuv) + 1, K{});
-        ++degree[u];
-        ++degree[v];
+    const uint64_t bias = opts.base_index;
+    readEdgelistFormatDoChecked<false, 0>(blk, /*symmetric=*/false, [&](int64_t ri, int64_t rj, double) {
+        auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
+        if (bi < bias || bj < bias)
+            return;
+        K u = nm.find(static_cast<K>(bi - bias));
+        K v = nm.find(static_cast<K>(bj - bias));
+        if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
+            return;
+        if (u == v)
+            return; // skip self-loops
+        cb(u, v);
     });
-
-    K N = static_cast<K>(degree.size());
-    if (nm.dense)
-        nm.N = N; // update now that we know the actual N
-
-    // ── Prefix sum → offsets ──────────────────────────────────────────────────
-    DiGraphCsr<K, O> g;
-    g.offsets.resize(N + 1);
-    O total = O{};
-    for (K u = 0; u < N; ++u)
-    {
-        g.offsets[u] = total;
-        total += degree[u];
-    }
-    g.offsets[N] = total;
-    degree.clear();
-    degree.shrink_to_fit();
-
-    // ── Pass 2: scatter edges ─────────────────────────────────────────────────
-    g.edgeKeys.resize(static_cast<size_t>(total));
-    std::vector<O> write_pos(g.offsets.begin(), g.offsets.begin() + N);
-
-    forEachEdge([&](K u, K v) {
-        g.edgeKeys[write_pos[u]++] = v;
-        g.edgeKeys[write_pos[v]++] = u;
-    });
-
-    return g;
 }
 
-// ─── buildCSRFromCSVMT ────────────────────────────────────────────────────────
+// ─── partitionIntoChunks ──────────────────────────────────────────────────────
 //
-// Multi-threaded CSR build from a CSV edge list.
+// Split the file into T contiguous, line-aligned chunks that tile the data with
+// no gaps or overlaps. Chunk t is handled entirely by loop-iteration t in both
+// CSR passes, so a vertex's edges from chunk t always land in the same place.
+
+inline std::vector<std::string_view> partitionIntoChunks(std::string_view data, int T)
+{
+    std::vector<std::string_view> chunks;
+    chunks.reserve(T);
+    const size_t DS = data.size();
+    const size_t step = T > 0 ? (DS + static_cast<size_t>(T) - 1) / static_cast<size_t>(T) : DS;
+    for (int t = 0; t < T; ++t)
+    {
+        size_t b = static_cast<size_t>(t) * step;
+        if (b >= DS)
+        {
+            chunks.emplace_back(); // empty tail chunk (DS not divisible by T)
+            continue;
+        }
+        chunks.push_back(readEdgelistFormatBlock(data, b, step));
+    }
+    return chunks;
+}
+
+// ─── buildCSRFromCSV ──────────────────────────────────────────────────────────
 //
-// The file is divided into 256 KB line-aligned blocks. Threads pick blocks
-// dynamically (schedule(dynamic)) and each independently parse their block.
+// Two-pass, atomic-free CSR build from a CSV edge list. Works for any thread
+// count: T == 1 is just the T-chunk algorithm with a single chunk.
 //
-// Pass 1 — parallel degree count:
-//   P = 4 partitioned degree arrays. Thread t always writes to partition t % P.
-//   With T ≤ P, no two threads share a partition and the atomics are uncontended.
-//   With T > P, the atomics prevent data races between threads sharing a partition.
-//   Partitioning reduces false-sharing on hub vertices that appear in many blocks.
+// The file is split into T contiguous chunks (one per loop iteration). Each
+// chunk keeps its OWN degree row, so no two iterations write the same counter —
+// no atomics. After pass 1 we know, per vertex v, exactly how many edges each
+// chunk contributes, so we can hand each chunk a private, disjoint slice of v's
+// adjacency region. Pass 2 then scatters with plain stores, again atomic-free.
 //
-// Pass 2 — parallel scatter:
-//   Each thread uses atomic-capture on write_pos[u] to claim a unique slot.
-//   The captured (pre-increment) position is then written without further
-//   synchronisation since each slot is claimed exactly once.
+//   Pass 1:  tdeg[t][v] = # endpoints at v contributed by chunk t.
+//   Offsets: offsets[v] = prefix sum of total degree; then overwrite tdeg in
+//            place so tdeg[t][v] becomes chunk t's write cursor into v's region.
+//   Pass 2:  edgeKeys[tdeg[t][u]++] = v   (and symmetrically for v).
 //
-// Dense mode (no node file): nm.N is unknown upfront. A sequential pre-scan
-// finds max(u, v) + 1 first, then the two parallel passes proceed. For large
-// files this pre-scan is the bottleneck; provide a node file to skip it.
+// Scratch memory is T * N * sizeof(O) for the degree/cursor table.
 
 template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildCSRFromCSVMT(std::string_view data, NodeMap<K> &nm, const ParseOptions &opts)
+DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const ParseOptions &opts)
 {
+    // The GVEL parser natively handles '#' and '%' comments only.
     if (opts.comment_char != '#' && opts.comment_char != '%')
         throw std::runtime_error("comment_char: not yet implemented for chars other than '#' and '%'");
 
-    const int T = static_cast<int>(opts.num_threads);
-    const size_t B = 256 * 1024; // 256 KB per block
-    const size_t DS = data.size();
-    constexpr int P = 4; // degree-array partitions
+    const int T = opts.num_threads > 1 ? static_cast<int>(opts.num_threads) : 1;
+    auto chunks = partitionIntoChunks(data, T);
 
-    // Dense mode: one sequential pass to discover N before allocating.
-    // Sparse mode: nm.N is already set by buildNodeMap — skip this pass.
-    if (nm.dense && nm.N == 0)
+    // Dense mode (no node file): discover N = max(compact id) + 1 first, since we
+    // must size the degree table before counting. Parallel max-reduction.
+    if (nm.isDense() && nm.N == 0)
     {
+        std::vector<K> tmax(T, K{});
+#pragma omp parallel for num_threads(T) schedule(static)
+        for (int t = 0; t < T; ++t)
+        {
+            K m = K{};
+            forEachValidEdge(chunks[t], nm, opts, [&](K u, K v) { m = std::max({m, u, v}); });
+            tmax[t] = m;
+        }
         K N = K{};
-        readEdgelistFormatDoChecked<false, 0>(data, false, [&](int64_t ri, int64_t rj, double) {
-            auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
-            if (bi < opts.base_index || bj < opts.base_index)
-                return;
-            K u = static_cast<K>(bi - opts.base_index);
-            K v = static_cast<K>(bj - opts.base_index);
-            N = std::max(N, static_cast<K>(std::max(u, v) + K{1}));
-        });
-        nm.N = N;
+        for (int t = 0; t < T; ++t)
+            N = std::max(N, tmax[t]);
+        nm.N = static_cast<K>(N + 1);
     }
-    K N = nm.N;
+    const K N = nm.N;
 
-    // P × N degree arrays. Each thread owns one partition, eliminating
-    // contention between threads that never share a partition (T ≤ P case).
-    std::vector<std::vector<K>> pdeg(P, std::vector<K>(N, K{}));
-
-    // ── Pass 1: parallel degree count ─────────────────────────────────────────
-#pragma omp parallel for num_threads(T) schedule(dynamic)
-    for (size_t b = 0; b < DS; b += B)
+    // ── Pass 1: per-chunk degree counts (no shared writes) ─────────────────────
+    std::vector<std::vector<O>> tdeg(T, std::vector<O>(N, O{}));
+#pragma omp parallel for num_threads(T) schedule(static)
+    for (int t = 0; t < T; ++t)
     {
-        const int p = omp_get_thread_num() % P;
-        auto blk = readEdgelistFormatBlock(data, b, B);
-        readEdgelistFormatDoChecked<false, 0>(blk, false, [&](int64_t ri, int64_t rj, double) {
-            auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
-            if (bi < opts.base_index || bj < opts.base_index)
-                return;
-            K u = nm.find(static_cast<K>(bi - opts.base_index));
-            K v = nm.find(static_cast<K>(bj - opts.base_index));
-            if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
-                return;
-            if (u == v)
-                return;
-#pragma omp atomic
-            ++pdeg[p][u];
-#pragma omp atomic
-            ++pdeg[p][v];
+        auto &deg = tdeg[t];
+        forEachValidEdge(chunks[t], nm, opts, [&](K u, K v) {
+            ++deg[u];
+            ++deg[v];
         });
     }
 
-    // ── Sequential reduction + prefix sum ─────────────────────────────────────
+    // ── Offsets = prefix sum of total per-vertex degree ────────────────────────
     DiGraphCsr<K, O> g;
-    g.offsets.resize(N + 1);
+    g.offsets.resize(static_cast<size_t>(N) + 1);
     O total = O{};
-    for (K u = 0; u < N; ++u)
+    for (K v = 0; v < N; ++v)
     {
-        O deg = O{};
-        for (int p = 0; p < P; ++p)
-            deg += pdeg[p][u];
-        g.offsets[u] = total;
-        total += deg;
+        g.offsets[v] = total;
+        for (int t = 0; t < T; ++t)
+            total += tdeg[t][v];
     }
     g.offsets[N] = total;
-    pdeg.clear();
-    pdeg.shrink_to_fit();
 
-    // ── Pass 2: parallel scatter with atomic-capture ───────────────────────────
-    g.edgeKeys.resize(static_cast<size_t>(total));
-    std::vector<O> write_pos(g.offsets.begin(), g.offsets.begin() + N);
-
-#pragma omp parallel for num_threads(T) schedule(dynamic)
-    for (size_t b = 0; b < DS; b += B)
+    // ── Turn tdeg into per-chunk write cursors (in place) ──────────────────────
+    // cursor[t][v] = offsets[v] + sum over chunks before t of their degree at v.
+#pragma omp parallel for num_threads(T) schedule(static)
+    for (K v = 0; v < N; ++v)
     {
-        auto blk = readEdgelistFormatBlock(data, b, B);
-        readEdgelistFormatDoChecked<false, 0>(blk, false, [&](int64_t ri, int64_t rj, double) {
-            auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
-            if (bi < opts.base_index || bj < opts.base_index)
-                return;
-            K u = nm.find(static_cast<K>(bi - opts.base_index));
-            K v = nm.find(static_cast<K>(bj - opts.base_index));
-            if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
-                return;
-            if (u == v)
-                return;
-            O pu, pv;
-#pragma omp atomic capture
-            pu = write_pos[u]++;
-#pragma omp atomic capture
-            pv = write_pos[v]++;
-            g.edgeKeys[pu] = v;
-            g.edgeKeys[pv] = u;
+        O base = g.offsets[v];
+        for (int t = 0; t < T; ++t)
+        {
+            O d = tdeg[t][v];
+            tdeg[t][v] = base;
+            base += d;
+        }
+    }
+
+    // ── Pass 2: scatter into disjoint slices (no shared writes) ────────────────
+    g.edgeKeys.resize(static_cast<size_t>(total));
+#pragma omp parallel for num_threads(T) schedule(static)
+    for (int t = 0; t < T; ++t)
+    {
+        auto &cur = tdeg[t];
+        forEachValidEdge(chunks[t], nm, opts, [&](K u, K v) {
+            g.edgeKeys[cur[u]++] = v;
+            g.edgeKeys[cur[v]++] = u;
         });
     }
 
@@ -379,14 +415,10 @@ DiGraphCsr<K, O> buildCSRFromCSVMT(std::string_view data, NodeMap<K> &nm, const 
 
 // ─── buildGraphFromMETIS ─────────────────────────────────────────────────────
 //
-// Parses a METIS adjacency-list file in a single pass.
-// Header line: "N M" (vertex count, undirected edge count).
-// Lines 1..N: space-separated 1-indexed neighbor IDs.
-// Comment lines starting with '%' or opts.comment_char are skipped anywhere.
-//
-// Because the header gives us both N and M upfront, we allocate the full CSR
-// before reading any edges and fill it in one sequential scan — no two-pass
-// needed, unlike the CSV reader.
+// Parses a METIS adjacency-list file in a single pass. Header line "N M" gives
+// both counts up front, so we allocate the full CSR and fill it in one scan —
+// no two-pass needed. Lines 1..N hold space-separated 1-indexed neighbor ids;
+// comment lines starting with '%' or opts.comment_char are skipped anywhere.
 
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const ParseOptions &opts)
@@ -413,7 +445,7 @@ DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const ParseOptions &
     p = r1.ptr;
     while (p < end && (*p == ' ' || *p == '\t'))
         ++p;
-    auto r2 = std::from_chars(p, end, M);
+    (void)std::from_chars(p, end, M);
     skipLine();
 
     DiGraphCsr<K, O> g;
@@ -452,11 +484,7 @@ DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const ParseOptions &
 // ─── readParquetColumn ───────────────────────────────────────────────────────
 //
 // Reads a single named column from a Parquet file into a std::vector<T>.
-// Handles both uint32 and uint64 stored columns — useful when reading files
-// that may have been written with either K or O width.
-// Add more Arrow types below as needed when supporting other formats.
-//
-// Arrow headers are only needed here; pull them in just above the function.
+// Handles both uint32 and uint64 stored columns.
 
 #include <arrow/api.h>
 #include <arrow/io/file.h>
@@ -495,7 +523,7 @@ template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
 {
     NodeMap<K> nm;
-    return buildGraph(gd, nd, nm);
+    return buildGraph<K, O>(gd, nd, nm);
 }
 
 template <class K = uint32_t, class O = uint64_t>
@@ -509,17 +537,12 @@ DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd,
         for (size_t i = 0; i < gd.opts.skip_rows && !data.empty(); ++i)
         {
             auto nl = data.find('\n');
-            if (nl != std::string_view::npos)
-                data = data.substr(nl + 1);
-            else
-                data = {};
+            data = (nl != std::string_view::npos) ? data.substr(nl + 1) : std::string_view{};
         }
         // nd == nullptr → dense (identity) mode, N discovered during scan.
-        // nd != nullptr → sparse mode, N comes from the node map.
+        // nd != nullptr → Array/Hash mode, N comes from the node map.
         nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
-        if (gd.opts.num_threads <= 1)
-            return buildCSRFromCSVST<K, O>(data, nm, gd.opts);
-        return buildCSRFromCSVMT<K, O>(data, nm, gd.opts);
+        return buildCSRFromCSV<K, O>(data, nm, gd.opts);
     }
 
     case METIS:
@@ -545,9 +568,8 @@ DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd,
 
 // ─── buildLabelMap ────────────────────────────────────────────────────────────
 //
-// Reads a label file (one label per line) into a vector<L> indexed by compact ID.
-// Respects skip_rows and comment_char from opts.
-// L must be an arithmetic type (int32_t by default).
+// Reads a label file (one label per line) into a vector<L> indexed by compact id.
+// Respects skip_rows and comment_char from opts. L must be arithmetic.
 
 template <class L = int32_t>
 std::vector<L> buildLabelMap(const std::string &labels_path, size_t N, const ParseOptions &opts)
