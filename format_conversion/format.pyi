@@ -42,17 +42,15 @@ class EdgesFormat:
     def value(self) -> int:
         ...
 class GraphDescriptor:
-    def __init__(self, path: str, fmt: EdgesFormat, opts: ParseOptions = ...) -> None:
+    def __init__(self, path: os.PathLike | str | bytes, fmt: EdgesFormat, opts: ParseOptions = ...) -> None:
         ...
 class NodeDescriptor:
-    def __init__(self, path: str, opts: ParseOptions = ...) -> None:
+    def __init__(self, path: os.PathLike | str | bytes, opts: ParseOptions = ...) -> None:
         ...
 class ParseOptions:
     comment_char: str
     sep: str
     def __init__(self) -> None:
-        ...
-    def __repr__(self) -> str:
         ...
     @property
     def base_index(self) -> int:
@@ -86,7 +84,7 @@ class ParseOptions:
         ...
 def convert(input: GraphDescriptor, nodes: NodeDescriptor = None, output_path: os.PathLike | str | bytes, output_fmt: EdgesFormat) -> None:
     ...
-def partition(input: GraphDescriptor, nodes: NodeDescriptor = None, labels_path: os.PathLike | str | bytes, label_opts: ParseOptions = ..., output_dir: os.PathLike | str | bytes, output_fmt: EdgesFormat, batch_size: typing.SupportsInt = 18446744073709551615) -> None:
+def partition(input: GraphDescriptor, nodes: NodeDescriptor = None, labels_path: os.PathLike | str | bytes, output_dir: os.PathLike | str | bytes, output_fmt: EdgesFormat, label_opts: ParseOptions = ..., batch_size: typing.SupportsInt = 18446744073709551615) -> None:
     ...
 CSR_PARQUET: EdgesFormat  # value = <EdgesFormat.CSR_PARQUET: 2>
 CSV_EDGELIST: EdgesFormat  # value = <EdgesFormat.CSV_EDGELIST: 0>

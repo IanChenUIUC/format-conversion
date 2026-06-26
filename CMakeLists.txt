@@ -11,12 +11,12 @@ find_package(pybind11 REQUIRED)
 # Arrow/Parquet via pyarrow — must be in [build-system] requires so it is
 # present in the build environment when cmake runs.
 execute_process(
-    COMMAND "${Python_EXECUTABLE}" -c
+    COMMAND "${PYTHON_EXECUTABLE}" -c
         "import pyarrow; print(pyarrow.get_library_dirs()[0])"
     OUTPUT_VARIABLE ARROW_LIB_DIR OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE _arrow_result)
 execute_process(
-    COMMAND "${Python_EXECUTABLE}" -c
+    COMMAND "${PYTHON_EXECUTABLE}" -c
         "import pyarrow; print(pyarrow.get_include())"
     OUTPUT_VARIABLE ARROW_INCLUDE_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
 if(NOT _arrow_result EQUAL 0)

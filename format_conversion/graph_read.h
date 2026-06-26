@@ -370,6 +370,13 @@ template <class T> std::vector<T> readParquetColumn(const std::string &path, con
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
 {
+    NodeMap<K> nm;
+    return buildGraph(gd, nd, nm);
+}
+
+template <class K = uint32_t, class O = uint64_t>
+DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd, NodeMap<K> &nm)
+{
     switch (gd.fmt)
     {
     case CSV_EDGELIST: {
@@ -385,7 +392,7 @@ DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
         }
         // nd == nullptr → dense (identity) mode, N discovered during scan.
         // nd != nullptr → sparse mode, N comes from the node map.
-        NodeMap<K> nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
+        nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
         if (gd.opts.num_threads <= 1)
             return buildCSRFromCSVST<K, O>(data, nm, gd.opts);
         throw std::runtime_error("buildGraph: multi-threaded CSV not yet implemented");
@@ -410,4 +417,62 @@ DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
     default:
         throw std::runtime_error("buildGraph: unknown format");
     }
+}
+
+// ─── buildLabelMap ────────────────────────────────────────────────────────────
+//
+// Reads a label file (one label per line) into a vector<L> indexed by compact ID.
+// Respects skip_rows and comment_char from opts.
+// L must be an arithmetic type (int32_t by default).
+
+template <class L = int32_t>
+std::vector<L> buildLabelMap(const std::string &labels_path, size_t N, const ParseOptions &opts)
+{
+    static_assert(std::is_arithmetic_v<L>, "label type must be arithmetic; string labels not yet supported");
+
+    MmapFile mf(labels_path);
+    const char *p = mf.data ? mf.data : nullptr;
+    const char *end = p ? p + mf.size : nullptr;
+
+    for (size_t i = 0; i < opts.skip_rows && p < end; ++i)
+    {
+        const char *nl = (const char *)memchr(p, '\n', end - p);
+        p = nl ? nl + 1 : end;
+    }
+
+    std::vector<L> labels;
+    labels.reserve(N);
+
+    while (p && p < end && labels.size() < N)
+    {
+        while (p < end && (*p == ' ' || *p == '\t'))
+            ++p;
+        if (p >= end)
+            break;
+        if (*p == '\n')
+        {
+            ++p;
+            continue;
+        }
+        if (*p == opts.comment_char)
+        {
+            const char *nl = (const char *)memchr(p, '\n', end - p);
+            p = nl ? nl + 1 : end;
+            continue;
+        }
+        L val{};
+        auto [next, ec] = std::from_chars(p, end, val);
+        if (ec == std::errc{})
+        {
+            labels.push_back(val);
+            p = next;
+        }
+        const char *nl = (const char *)memchr(p, '\n', end - p);
+        p = nl ? nl + 1 : end;
+    }
+
+    if (labels.size() != N)
+        throw std::runtime_error("buildLabelMap: expected " + std::to_string(N) + " labels, got " +
+                                 std::to_string(labels.size()));
+    return labels;
 }

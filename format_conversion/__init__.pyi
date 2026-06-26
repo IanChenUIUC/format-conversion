@@ -6,12 +6,4 @@ from format_conversion.format import ParseOptions
 from format_conversion.format import convert
 from format_conversion.format import partition
 from . import format
-
-__all__: list = [
-    "EdgesFormat",
-    "ParseOptions",
-    "NodeDescriptor",
-    "GraphDescriptor",
-    "convert",
-    "partition",
-]
+__all__: list = ['EdgesFormat', 'ParseOptions', 'NodeDescriptor', 'GraphDescriptor', 'convert', 'partition']

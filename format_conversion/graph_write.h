@@ -23,9 +23,8 @@
 
 inline uint32_t numDigits(uint32_t n)
 {
-    static constexpr uint32_t pow10[] = {
-        1u, 10u, 100u, 1000u, 10000u, 100000u, 1000000u, 10000000u, 100000000u, 1000000000u
-    };
+    static constexpr uint32_t pow10[] = {1u,      10u,      100u,      1000u,      10000u,
+                                         100000u, 1000000u, 10000000u, 100000000u, 1000000000u};
     uint32_t t = (std::bit_width(n) * 1233u) >> 12;
     return t + (n >= pow10[t]);
 }
@@ -47,14 +46,12 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
     // ── Pass 1: compute per-vertex line byte lengths ──────────────────────────
     std::vector<size_t> line_bytes(n);
 
-    auto computeLineSizes = [&](size_t u_begin, size_t u_end)
-    {
+    auto computeLineSizes = [&](size_t u_begin, size_t u_end) {
         for (size_t u = u_begin; u < u_end; ++u)
         {
             size_t bytes = 1; // newline
             bool first = true;
-            g.forEachEdgeKey((K)u, [&](K v)
-            {
+            g.forEachEdgeKey((K)u, [&](K v) {
                 if (!first)
                     ++bytes; // space separator
                 bytes += numDigits((uint32_t)(v + 1));
@@ -75,8 +72,7 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
         {
             size_t bytes = 1;
             bool first = true;
-            g.forEachEdgeKey((K)u, [&](K v)
-            {
+            g.forEachEdgeKey((K)u, [&](K v) {
                 if (!first)
                     ++bytes;
                 bytes += numDigits((uint32_t)(v + 1));
@@ -113,14 +109,12 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
     memcpy(buf, header, hlen);
 
     // ── Pass 2: write adjacency lines ─────────────────────────────────────────
-    auto writeLines = [&](size_t u_begin, size_t u_end)
-    {
+    auto writeLines = [&](size_t u_begin, size_t u_end) {
         for (size_t u = u_begin; u < u_end; ++u)
         {
             char *p = buf + line_off[u];
             bool first = true;
-            g.forEachEdgeKey((K)u, [&](K v)
-            {
+            g.forEachEdgeKey((K)u, [&](K v) {
                 if (!first)
                     *p++ = ' ';
                 auto [ptr, _] = std::to_chars(p, p + 11, (uint32_t)(v + 1));
@@ -142,8 +136,7 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
         {
             char *p = buf + line_off[u];
             bool first = true;
-            g.forEachEdgeKey((K)u, [&](K v)
-            {
+            g.forEachEdgeKey((K)u, [&](K v) {
                 if (!first)
                     *p++ = ' ';
                 auto [ptr, _] = std::to_chars(p, p + 11, (uint32_t)(v + 1));
@@ -169,16 +162,14 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
 // This costs one vector copy but avoids any ambiguity for consumers.
 
 template <class K, class O>
-void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_path,
-                         const ParseOptions & = {})
+void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions & = {})
 {
     static_assert(sizeof(O) == 8, "offsets (O) must be uint64_t");
 
     // Helper: wrap an array as a single-column Parquet table and write to disk.
-    auto writeColumn = [](const std::string &path, const std::string &col_name,
-                          std::shared_ptr<arrow::Array> arr) {
+    auto writeColumn = [](const std::string &path, const std::string &col_name, std::shared_ptr<arrow::Array> arr) {
         auto table = arrow::Table::Make(arrow::schema({arrow::field(col_name, arr->type())}), {arr});
-        auto out   = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+        auto out = arrow::io::FileOutputStream::Open(path).ValueOrDie();
         PARQUET_THROW_NOT_OK(parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), out));
         PARQUET_THROW_NOT_OK(out->Close());
     };
@@ -205,8 +196,7 @@ void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_pa
 // u < v, using compact 0-indexed IDs. opts.sep controls the delimiter.
 
 template <class K, class O>
-void writeGraphToCSV(const DiGraphCsr<K, O> &g, const std::string &output_path,
-                     const ParseOptions &opts = {})
+void writeGraphToCSV(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
 {
     std::string out = output_path + ".csv";
     std::ofstream f(out);
@@ -228,16 +218,16 @@ void writeGraph(const DiGraphCsr<K, O> &g, const std::string &output_path, Edges
 {
     switch (fmt)
     {
-        case METIS:
-            writeGraphToMetis(g, output_path, opts);
-            return;
-        case CSR_PARQUET:
-            writeGraphToParquet(g, output_path, opts);
-            return;
-        case CSV_EDGELIST:
-            writeGraphToCSV(g, output_path, opts);
-            return;
-        default:
-            throw std::runtime_error("writeGraph: unknown format");
+    case METIS:
+        writeGraphToMetis(g, output_path, opts);
+        return;
+    case CSR_PARQUET:
+        writeGraphToParquet(g, output_path, opts);
+        return;
+    case CSV_EDGELIST:
+        writeGraphToCSV(g, output_path, opts);
+        return;
+    default:
+        throw std::runtime_error("writeGraph: unknown format");
     }
 }
