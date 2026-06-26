@@ -74,6 +74,12 @@ template <class K = uint32_t> struct NodeMap
     K N = 0;
     robin_hood::unordered_flat_map<K, K> map; // empty in dense mode
 
+    // Borrowed from the NodeDescriptor's MmapFile — NodeDescriptor must outlive NodeMap.
+    // Empty in dense mode (no file).
+    std::vector<size_t> line_offsets; // line_offsets[compact_id] = byte offset of that row
+    const char *file_data = nullptr;
+    size_t file_size = 0;
+
     explicit NodeMap(K n) : dense(true), N(n) {}  // Dense: raw IDs are already 0-indexed.
     NodeMap() : dense(false), N(0) {}             // Sparse: caller populates map and N.
 
@@ -87,6 +93,21 @@ template <class K = uint32_t> struct NodeMap
         auto it = map.find(raw_id);
         return it != map.end() ? it->second : INVALID_ID;
     }
+
+    // Return the raw CSV row for a compact ID as a string_view into the mmap'd file.
+    // Returns an empty view in dense mode or if the ID is out of range.
+    std::string_view getRow(K compact_id) const
+    {
+        if (!file_data || compact_id >= static_cast<K>(line_offsets.size()))
+            return {};
+        const char *start = file_data + line_offsets[compact_id];
+        const char *end = file_data + file_size;
+        const char *nl = static_cast<const char *>(memchr(start, '\n', end - start));
+        const char *row_end = nl ? nl : end;
+        if (row_end > start && *(row_end - 1) == '\r') // trim Windows \r\n
+            --row_end;
+        return {start, static_cast<size_t>(row_end - start)};
+    }
 };
 
 // ─── buildNodeMap ─────────────────────────────────────────────────────────────
@@ -94,6 +115,9 @@ template <class K = uint32_t> struct NodeMap
 template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
 {
     NodeMap<K> nm;
+    nm.file_data = nd.mmap.data;
+    nm.file_size = nd.mmap.size;
+
     const char *p = nd.mmap.data;
     const char *end = p + nd.mmap.size;
 
@@ -106,6 +130,7 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
     K compact = 0;
     while (p < end)
     {
+        const char *line_start = p; // save before stripping whitespace, for getRow
         while (p < end && (*p == ' ' || *p == '\t'))
             ++p;
         if (p >= end)
@@ -125,7 +150,10 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
         auto [next, ec] = std::from_chars(p, end, id);
         if (ec == std::errc{})
             if (nm.map.emplace(id, compact).second)
+            {
+                nm.line_offsets.push_back(static_cast<size_t>(line_start - nd.mmap.data));
                 ++compact;
+            }
         const char *nl = (const char *)memchr(p, '\n', end - p);
         p = nl ? nl + 1 : end;
     }
@@ -151,6 +179,11 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildCSRFromCSVST(std::string_view data, NodeMap<K> &nm, const ParseOptions &opts)
 {
+    // The underlying parser natively handles '#' and '%' as comment characters.
+    // Custom comment chars require a different parsing strategy.
+    if (opts.comment_char != '#' && opts.comment_char != '%')
+        throw std::runtime_error("comment_char: not yet implemented for chars other than '#' and '%'");
+
     std::vector<K> degree;
 
     // Helper: apply base_index, validate, return compact IDs via nm.
