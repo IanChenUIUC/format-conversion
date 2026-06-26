@@ -253,6 +253,130 @@ DiGraphCsr<K, O> buildCSRFromCSVST(std::string_view data, NodeMap<K> &nm, const 
     return g;
 }
 
+// ─── buildCSRFromCSVMT ────────────────────────────────────────────────────────
+//
+// Multi-threaded CSR build from a CSV edge list.
+//
+// The file is divided into 256 KB line-aligned blocks. Threads pick blocks
+// dynamically (schedule(dynamic)) and each independently parse their block.
+//
+// Pass 1 — parallel degree count:
+//   P = 4 partitioned degree arrays. Thread t always writes to partition t % P.
+//   With T ≤ P, no two threads share a partition and the atomics are uncontended.
+//   With T > P, the atomics prevent data races between threads sharing a partition.
+//   Partitioning reduces false-sharing on hub vertices that appear in many blocks.
+//
+// Pass 2 — parallel scatter:
+//   Each thread uses atomic-capture on write_pos[u] to claim a unique slot.
+//   The captured (pre-increment) position is then written without further
+//   synchronisation since each slot is claimed exactly once.
+//
+// Dense mode (no node file): nm.N is unknown upfront. A sequential pre-scan
+// finds max(u, v) + 1 first, then the two parallel passes proceed. For large
+// files this pre-scan is the bottleneck; provide a node file to skip it.
+
+template <class K = uint32_t, class O = uint64_t>
+DiGraphCsr<K, O> buildCSRFromCSVMT(std::string_view data, NodeMap<K> &nm, const ParseOptions &opts)
+{
+    if (opts.comment_char != '#' && opts.comment_char != '%')
+        throw std::runtime_error("comment_char: not yet implemented for chars other than '#' and '%'");
+
+    const int T = static_cast<int>(opts.num_threads);
+    const size_t B = 256 * 1024; // 256 KB per block
+    const size_t DS = data.size();
+    constexpr int P = 4; // degree-array partitions
+
+    // Dense mode: one sequential pass to discover N before allocating.
+    // Sparse mode: nm.N is already set by buildNodeMap — skip this pass.
+    if (nm.dense && nm.N == 0)
+    {
+        K N = K{};
+        readEdgelistFormatDoChecked<false, 0>(data, false, [&](int64_t ri, int64_t rj, double) {
+            auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
+            if (bi < opts.base_index || bj < opts.base_index)
+                return;
+            K u = static_cast<K>(bi - opts.base_index);
+            K v = static_cast<K>(bj - opts.base_index);
+            N = std::max(N, static_cast<K>(std::max(u, v) + K{1}));
+        });
+        nm.N = N;
+    }
+    K N = nm.N;
+
+    // P × N degree arrays. Each thread owns one partition, eliminating
+    // contention between threads that never share a partition (T ≤ P case).
+    std::vector<std::vector<K>> pdeg(P, std::vector<K>(N, K{}));
+
+    // ── Pass 1: parallel degree count ─────────────────────────────────────────
+#pragma omp parallel for num_threads(T) schedule(dynamic)
+    for (size_t b = 0; b < DS; b += B)
+    {
+        const int p = omp_get_thread_num() % P;
+        auto blk = readEdgelistFormatBlock(data, b, B);
+        readEdgelistFormatDoChecked<false, 0>(blk, false, [&](int64_t ri, int64_t rj, double) {
+            auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
+            if (bi < opts.base_index || bj < opts.base_index)
+                return;
+            K u = nm.find(static_cast<K>(bi - opts.base_index));
+            K v = nm.find(static_cast<K>(bj - opts.base_index));
+            if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
+                return;
+            if (u == v)
+                return;
+#pragma omp atomic
+            ++pdeg[p][u];
+#pragma omp atomic
+            ++pdeg[p][v];
+        });
+    }
+
+    // ── Sequential reduction + prefix sum ─────────────────────────────────────
+    DiGraphCsr<K, O> g;
+    g.offsets.resize(N + 1);
+    O total = O{};
+    for (K u = 0; u < N; ++u)
+    {
+        O deg = O{};
+        for (int p = 0; p < P; ++p)
+            deg += pdeg[p][u];
+        g.offsets[u] = total;
+        total += deg;
+    }
+    g.offsets[N] = total;
+    pdeg.clear();
+    pdeg.shrink_to_fit();
+
+    // ── Pass 2: parallel scatter with atomic-capture ───────────────────────────
+    g.edgeKeys.resize(static_cast<size_t>(total));
+    std::vector<O> write_pos(g.offsets.begin(), g.offsets.begin() + N);
+
+#pragma omp parallel for num_threads(T) schedule(dynamic)
+    for (size_t b = 0; b < DS; b += B)
+    {
+        auto blk = readEdgelistFormatBlock(data, b, B);
+        readEdgelistFormatDoChecked<false, 0>(blk, false, [&](int64_t ri, int64_t rj, double) {
+            auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
+            if (bi < opts.base_index || bj < opts.base_index)
+                return;
+            K u = nm.find(static_cast<K>(bi - opts.base_index));
+            K v = nm.find(static_cast<K>(bj - opts.base_index));
+            if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
+                return;
+            if (u == v)
+                return;
+            O pu, pv;
+#pragma omp atomic capture
+            pu = write_pos[u]++;
+#pragma omp atomic capture
+            pv = write_pos[v]++;
+            g.edgeKeys[pu] = v;
+            g.edgeKeys[pv] = u;
+        });
+    }
+
+    return g;
+}
+
 // ─── buildGraphFromMETIS ─────────────────────────────────────────────────────
 //
 // Parses a METIS adjacency-list file in a single pass.
@@ -395,7 +519,7 @@ DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd,
         nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
         if (gd.opts.num_threads <= 1)
             return buildCSRFromCSVST<K, O>(data, nm, gd.opts);
-        throw std::runtime_error("buildGraph: multi-threaded CSV not yet implemented");
+        return buildCSRFromCSVMT<K, O>(data, nm, gd.opts);
     }
 
     case METIS:

@@ -8,8 +8,7 @@ set(PYBIND11_FINDPYTHON ON)
 find_package(OpenMP REQUIRED)
 find_package(pybind11 REQUIRED)
 
-# Arrow/Parquet via pyarrow — must be in [build-system] requires so it is
-# present in the build environment when cmake runs.
+# Arrow/Parquet via pyarrow
 execute_process(
     COMMAND "${PYTHON_EXECUTABLE}" -c
         "import pyarrow; print(pyarrow.get_library_dirs()[0])"

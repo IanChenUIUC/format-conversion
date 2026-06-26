@@ -98,6 +98,15 @@ def test_dense_no_node_file(out_fmt: Format, tmp_path):
 #
 # These test the knobs, not the format dispatch, so one output format suffices.
 
+@pytest.mark.parametrize("out_fmt", OUTPUT_FORMATS, ids=FORMAT_IDS)
+def test_parallel_csv_read(graph, out_fmt: Format, tmp_path):
+    """num_threads > 1 produces the same edge set as the default single-threaded path."""
+    seq_out = tmp_path / "seq"
+    par_out = tmp_path / "par"
+    convert(_csv_in(graph),                    _node(graph), seq_out, out_fmt.fmt)
+    convert(_csv_in(graph, num_threads=4),     _node(graph), par_out, out_fmt.fmt)
+    assert out_fmt.read(par_out) == out_fmt.read(seq_out)
+
 def test_base_index(tmp_path):
     """1-indexed edge list is shifted to 0-indexed compact IDs."""
     edges_path = tmp_path / "e.csv"

@@ -5,10 +5,14 @@ Compatible with [data-specification](https://github.com/illinois-or-research-ana
 
 ## Dependencies
 
+- pyarrow
+- omp
+
 ## External Libraries
 
 Fast edgelist loading is inspired by and uses code from:
-`bibtex
+
+```bibtex
 @software{Sahu_GVEL_Fast_Graph_2023,
   author = {Sahu, Subhajit},
   doi = {10.48550/arXiv.2311.14650},
@@ -17,9 +21,14 @@ Fast edgelist loading is inspired by and uses code from:
   version = {1.0.0},
   year = {2023}
 }
-`
+```
 
 Robinhood provides a faster alternative to `unordered_map`.
+
+## Usage
+
+The main patterns are described in the `examples/` folder, with format conversion as well as extracting subgraphs according to a partition.
+Any input formats can be read or written to through the python or cpp API.
 
 # Formats
 
@@ -38,13 +47,24 @@ Nodes may not need to have contiguous IDs.
 
 ### CSR (parquet)
 
-See icebug-format.
-0-indexed.
+Compressed Sparse Row format is a compact representation of the (directed) adjacency matrix.
+We store the indices as the columns in which each row has data.
+The non-zero entries denote the boundaries of the rows.
+
+Here, we use 64 bit nodeIDs, to be consistent with [icebug](https://github.com/Ladybug-Memory/icebug/).
 
 ### metis
 
-Undirected only.
-1-indexed.
+METIS format, also known as chaco format, stores undirected unweighted graphs in plaintext.
+
+n is number of vertices, m is number of undirected edges, vertex ids are 1-indexed:
+```
+n m
+v2 v3 v4
+v1 v3 v5 v6 v8
+v1 v2 
+...
+```
 
 ## Nodes
 
@@ -64,3 +84,24 @@ Additional columns may be included to represent node attributes such as:
 - other custom attributes
 
 The `node_id` column should be the first column, no matter if there are any additional attributes.
+
+# Benchmarks
+
+This repository was meant to be easily extensible for future formats, as well as memory efficient.
+Having high throughput generally follows from the above principles, and parallel I/O readers and writers are implemented alongside that.
+
+I do not know of any other repos that provide a simple format conversion.
+Here, we show that for many combinations of input and output formats, we are faster and more efficient than other parsers.
+These experiments are non-extensive.
+
+## Comparison to icebug-format
+
+TODO; minhyuk's duckdb icebug pipeline does edgelist to csr
+
+## Conversion to NetworKit
+
+TODO; compare to NetworKit reader/writer, which handles edgelists and metis
+
+# AI Usage Declaration
+
+Much of this codebase was implemented with assistance of Claude Code.
