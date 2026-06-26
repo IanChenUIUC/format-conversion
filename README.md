@@ -30,6 +30,19 @@ Robinhood provides a faster alternative to `unordered_map`.
 The main patterns are described in the `examples/` folder, with format conversion as well as extracting subgraphs according to a partition.
 Any input formats can be read or written to through the python or cpp API.
 
+### Parallelism
+
+While most of this is I/O bound, parallelism may help, depending on the architecture.
+Here is an ongoing list of which readers and writers support parallelism:
+
+| Format   | Input | Ouput |
+|--------- |-------|-------|
+| Edgelist | Yes   | No    |
+| CSR      | Yes*  | Yes*  |
+| METIS    | No    | Yes   |
+
+*Arrow parallelism is system dependant and is not explicitly controlled.
+
 # Formats
 
 ## Edges
@@ -53,7 +66,7 @@ The non-zero entries denote the boundaries of the rows.
 
 Here, we use 64 bit nodeIDs, to be consistent with [icebug](https://github.com/Ladybug-Memory/icebug/).
 
-### metis
+### METIS
 
 METIS format, also known as chaco format, stores undirected unweighted graphs in plaintext.
 
