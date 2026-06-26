@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cstring>
 #include <fcntl.h>
+#include <fstream>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <vector>
@@ -159,19 +160,64 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
 }
 
 // ─── writeGraphToParquet ─────────────────────────────────────────────────────
-// Milestone 5.
+//
+// Writes two single-column Parquet files:
+//   {output_path}.indices.parquet  — neighbor IDs (always uint64 for downstream compat)
+//   {output_path}.indptr.parquet   — CSR offset array (uint64, zero-copy)
+//
+// The indices are cast from K (typically uint32) to uint64 at write time.
+// This costs one vector copy but avoids any ambiguity for consumers.
 
-template <class K, class O> void writeGraphToParquet(const DiGraphCsr<K, O> &, const std::string &, const ParseOptions & = {})
+template <class K, class O>
+void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_path,
+                         const ParseOptions & = {})
 {
-    throw std::runtime_error("writeGraphToParquet: not yet implemented");
+    static_assert(sizeof(O) == 8, "offsets (O) must be uint64_t");
+
+    // Helper: wrap an array as a single-column Parquet table and write to disk.
+    auto writeColumn = [](const std::string &path, const std::string &col_name,
+                          std::shared_ptr<arrow::Array> arr) {
+        auto table = arrow::Table::Make(arrow::schema({arrow::field(col_name, arr->type())}), {arr});
+        auto out   = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+        PARQUET_THROW_NOT_OK(parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), out));
+        PARQUET_THROW_NOT_OK(out->Close());
+    };
+
+    // Indices: cast K → uint64 (explicit copy so all consumers see the same type).
+    {
+        std::vector<uint64_t> indices64(g.edgeKeys.begin(), g.edgeKeys.end());
+        auto buf = arrow::Buffer::Wrap(indices64.data(), indices64.size() * sizeof(uint64_t));
+        auto dat = arrow::ArrayData::Make(arrow::uint64(), (int64_t)indices64.size(), {nullptr, buf});
+        writeColumn(output_path + ".indices.parquet", "indices", arrow::MakeArray(dat));
+    } // indices64 freed here — Buffer::Wrap is synchronous so data is safe throughout
+
+    // Offsets: O == uint64_t, so wrap directly (zero-copy).
+    {
+        auto buf = arrow::Buffer::Wrap(g.offsets.data(), g.offsets.size() * sizeof(O));
+        auto dat = arrow::ArrayData::Make(arrow::uint64(), (int64_t)g.offsets.size(), {nullptr, buf});
+        writeColumn(output_path + ".indptr.parquet", "indptr", arrow::MakeArray(dat));
+    }
 }
 
 // ─── writeGraphToCSV ─────────────────────────────────────────────────────────
-// Milestone 5.
+//
+// Writes a headerless CSV edge list: one "u{sep}v" line per undirected edge,
+// u < v, using compact 0-indexed IDs. opts.sep controls the delimiter.
 
-template <class K, class O> void writeGraphToCSV(const DiGraphCsr<K, O> &, const std::string &, const ParseOptions & = {})
+template <class K, class O>
+void writeGraphToCSV(const DiGraphCsr<K, O> &g, const std::string &output_path,
+                     const ParseOptions &opts = {})
 {
-    throw std::runtime_error("writeGraphToCSV: not yet implemented");
+    std::string out = output_path + ".csv";
+    std::ofstream f(out);
+    if (!f)
+        throw std::runtime_error("Cannot create: " + out);
+    size_t n = g.span();
+    for (K u = 0; u < static_cast<K>(n); ++u)
+        g.forEachEdgeKey(u, [&](K v) {
+            if (v > u)
+                f << u << opts.sep << v << '\n';
+        });
 }
 
 // ─── writeGraph ──────────────────────────────────────────────────────────────

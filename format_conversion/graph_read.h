@@ -42,7 +42,9 @@ struct NodeDescriptor
     MmapFile mmap;
     ParseOptions opts;
 
-    NodeDescriptor(const std::string &path, ParseOptions opts = {}) : mmap(path), opts(std::move(opts)) {}
+    NodeDescriptor(const std::string &path, ParseOptions opts = {}) : mmap(path), opts(std::move(opts))
+    {
+    }
 };
 
 struct GraphDescriptor
@@ -80,11 +82,21 @@ template <class K = uint32_t> struct NodeMap
     const char *file_data = nullptr;
     size_t file_size = 0;
 
-    explicit NodeMap(K n) : dense(true), N(n) {}  // Dense: raw IDs are already 0-indexed.
-    NodeMap() : dense(false), N(0) {}             // Sparse: caller populates map and N.
+    explicit NodeMap(K n) : dense(true), N(n)
+    {
+    } // Dense: raw IDs are already 0-indexed.
+    NodeMap() : dense(false), N(0)
+    {
+    } // Sparse: caller populates map and N.
 
-    K size() const { return N; }
-    bool isDense() const { return dense; }
+    K size() const
+    {
+        return N;
+    }
+    bool isDense() const
+    {
+        return dense;
+    }
 
     K find(K raw_id) const
     {
@@ -188,10 +200,8 @@ DiGraphCsr<K, O> buildCSRFromCSVST(std::string_view data, NodeMap<K> &nm, const 
 
     // Helper: apply base_index, validate, return compact IDs via nm.
     // Invokes cb(u, v) only for valid, non-loop edges.
-    auto forEachEdge = [&](auto cb)
-    {
-        readEdgelistFormatDoChecked<false, 0>(data, /*symmetric=*/false, [&](int64_t ri, int64_t rj, double)
-        {
+    auto forEachEdge = [&](auto cb) {
+        readEdgelistFormatDoChecked<false, 0>(data, /*symmetric=*/false, [&](int64_t ri, int64_t rj, double) {
             auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
             if (bi < opts.base_index || bj < opts.base_index)
                 return;
@@ -206,8 +216,7 @@ DiGraphCsr<K, O> buildCSRFromCSVST(std::string_view data, NodeMap<K> &nm, const 
     };
 
     // ── Pass 1: count degrees ─────────────────────────────────────────────────
-    forEachEdge([&](K u, K v)
-    {
+    forEachEdge([&](K u, K v) {
         K maxuv = std::max(u, v);
         if (maxuv >= static_cast<K>(degree.size()))
             degree.resize(static_cast<size_t>(maxuv) + 1, K{});
@@ -236,8 +245,7 @@ DiGraphCsr<K, O> buildCSRFromCSVST(std::string_view data, NodeMap<K> &nm, const 
     g.edgeKeys.resize(static_cast<size_t>(total));
     std::vector<O> write_pos(g.offsets.begin(), g.offsets.begin() + N);
 
-    forEachEdge([&](K u, K v)
-    {
+    forEachEdge([&](K u, K v) {
         g.edgeKeys[write_pos[u]++] = v;
         g.edgeKeys[write_pos[v]++] = u;
     });
@@ -245,40 +253,161 @@ DiGraphCsr<K, O> buildCSRFromCSVST(std::string_view data, NodeMap<K> &nm, const 
     return g;
 }
 
+// ─── buildGraphFromMETIS ─────────────────────────────────────────────────────
+//
+// Parses a METIS adjacency-list file in a single pass.
+// Header line: "N M" (vertex count, undirected edge count).
+// Lines 1..N: space-separated 1-indexed neighbor IDs.
+// Comment lines starting with '%' or opts.comment_char are skipped anywhere.
+//
+// Because the header gives us both N and M upfront, we allocate the full CSR
+// before reading any edges and fill it in one sequential scan — no two-pass
+// needed, unlike the CSV reader.
+
+template <class K = uint32_t, class O = uint64_t>
+DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const ParseOptions &opts)
+{
+    const char *p = data.data();
+    const char *end = p + data.size();
+
+    auto skipLine = [&] {
+        while (p < end && *p != '\n')
+            ++p;
+        if (p < end)
+            ++p;
+    };
+
+    auto isCommentStart = [&](const char *q) { return *q == '%' || *q == opts.comment_char; };
+
+    // Skip leading comment lines.
+    while (p < end && isCommentStart(p))
+        skipLine();
+
+    // Parse header: N M (ignore optional format weight flag on same line).
+    size_t N = 0, M = 0;
+    auto r1 = std::from_chars(p, end, N);
+    p = r1.ptr;
+    while (p < end && (*p == ' ' || *p == '\t'))
+        ++p;
+    auto r2 = std::from_chars(p, end, M);
+    skipLine();
+
+    DiGraphCsr<K, O> g;
+    g.offsets.resize(N + 1);
+    g.edgeKeys.resize(2 * M);
+
+    O edge_pos = O{};
+    for (size_t u = 0; u < N; ++u)
+    {
+        // Skip any comment lines between vertex records.
+        while (p < end && isCommentStart(p))
+            skipLine();
+
+        g.offsets[u] = edge_pos;
+
+        // Parse space-separated 1-indexed neighbors on this line.
+        while (p < end && *p != '\n')
+        {
+            while (p < end && (*p == ' ' || *p == '\t'))
+                ++p;
+            if (p >= end || *p == '\n')
+                break;
+            K v = K{};
+            auto r = std::from_chars(p, end, v);
+            if (r.ec != std::errc{})
+                break;
+            g.edgeKeys[edge_pos++] = v - K{1}; // 1-indexed → 0-indexed
+            p = r.ptr;
+        }
+        skipLine();
+    }
+    g.offsets[N] = edge_pos;
+    return g;
+}
+
+// ─── readParquetColumn ───────────────────────────────────────────────────────
+//
+// Reads a single named column from a Parquet file into a std::vector<T>.
+// Handles both uint32 and uint64 stored columns — useful when reading files
+// that may have been written with either K or O width.
+// Add more Arrow types below as needed when supporting other formats.
+//
+// Arrow headers are only needed here; pull them in just above the function.
+
+#include <arrow/api.h>
+#include <arrow/io/file.h>
+#include <parquet/arrow/reader.h>
+
+template <class T> std::vector<T> readParquetColumn(const std::string &path, const std::string &col_name)
+{
+    auto infile = arrow::io::ReadableFile::Open(path).ValueOrDie();
+    auto reader = parquet::arrow::OpenFile(infile, arrow::default_memory_pool()).ValueOrDie();
+
+    std::shared_ptr<arrow::Table> table = reader->ReadTable().ValueOrDie();
+    auto col = table->GetColumnByName(col_name);
+    if (!col)
+        throw std::runtime_error("Column '" + col_name + "' not found in " + path);
+
+    std::vector<T> result;
+    result.reserve(static_cast<size_t>(col->length()));
+
+    for (const auto &chunk : col->chunks())
+    {
+        if (auto a = std::dynamic_pointer_cast<arrow::UInt32Array>(chunk))
+            for (int64_t i = 0; i < a->length(); ++i)
+                result.push_back(static_cast<T>(a->Value(i)));
+        else if (auto a = std::dynamic_pointer_cast<arrow::UInt64Array>(chunk))
+            for (int64_t i = 0; i < a->length(); ++i)
+                result.push_back(static_cast<T>(a->Value(i)));
+        else
+            throw std::runtime_error("Unexpected column type: " + chunk->type()->ToString());
+    }
+    return result;
+}
+
 // ─── buildGraph ──────────────────────────────────────────────────────────────
 
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
 {
-    // Strip leading rows (header, comments) from the edge data.
-    std::string_view data = gd.mmap.view();
-    for (size_t i = 0; i < gd.opts.skip_rows && !data.empty(); ++i)
-    {
-        auto nl = data.find('\n');
-        if (nl == std::string_view::npos)
-        {
-            data = {};
-            break;
-        }
-        data = data.substr(nl + 1);
-    }
-
     switch (gd.fmt)
     {
-        case CSV_EDGELIST:
+    case CSV_EDGELIST: {
+        // skip_rows strips header/preamble lines before handing data to the parser.
+        std::string_view data = gd.mmap.view();
+        for (size_t i = 0; i < gd.opts.skip_rows && !data.empty(); ++i)
         {
-            // nd == nullptr → dense (identity) mode, N discovered during scan.
-            // nd != nullptr → sparse mode, N comes from the node map.
-            NodeMap<K> nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
-            if (gd.opts.num_threads <= 1)
-                return buildCSRFromCSVST<K, O>(data, nm, gd.opts);
-            throw std::runtime_error("buildGraph: multi-threaded CSV not yet implemented");
+            auto nl = data.find('\n');
+            if (nl != std::string_view::npos)
+                data = data.substr(nl + 1);
+            else
+                data = {};
         }
-        case METIS:
-            throw std::runtime_error("buildGraph: METIS input not yet implemented");
-        case CSR_PARQUET:
-            throw std::runtime_error("buildGraph: CSR_PARQUET input not yet implemented");
-        default:
-            throw std::runtime_error("buildGraph: unknown format");
+        // nd == nullptr → dense (identity) mode, N discovered during scan.
+        // nd != nullptr → sparse mode, N comes from the node map.
+        NodeMap<K> nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
+        if (gd.opts.num_threads <= 1)
+            return buildCSRFromCSVST<K, O>(data, nm, gd.opts);
+        throw std::runtime_error("buildGraph: multi-threaded CSV not yet implemented");
+    }
+
+    case METIS:
+        return buildGraphFromMETIS<K, O>(gd.mmap.view(), gd.opts);
+
+    case CSR_PARQUET: {
+        const std::string suffix = ".indices.parquet";
+        const std::string &full = gd.mmap.path;
+        if (!full.ends_with(suffix))
+            throw std::runtime_error("CSR_PARQUET path must end with .indices.parquet");
+        std::string base = full.substr(0, full.size() - suffix.size());
+
+        DiGraphCsr<K, O> g;
+        g.edgeKeys = readParquetColumn<K>(base + ".indices.parquet", "indices");
+        g.offsets = readParquetColumn<O>(base + ".indptr.parquet", "indptr");
+        return g;
+    }
+
+    default:
+        throw std::runtime_error("buildGraph: unknown format");
     }
 }

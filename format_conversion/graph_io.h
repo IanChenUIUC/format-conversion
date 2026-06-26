@@ -15,15 +15,16 @@ struct MmapFile
     const char *data = nullptr;
     size_t size = 0;
     int fd = -1;
+    std::string path; // stored so readers that need the path post-open can access it
 
-    explicit MmapFile(const std::string &path)
+    explicit MmapFile(const std::string &p) : path(p)
     {
-        fd = open(path.c_str(), O_RDONLY);
+        fd = open(p.c_str(), O_RDONLY);
         if (fd < 0)
-            throw std::runtime_error("Cannot open: " + path);
+            throw std::runtime_error("Cannot open: " + p);
         struct stat sb;
         if (fstat(fd, &sb) < 0)
-            throw std::runtime_error("Cannot stat: " + path);
+            throw std::runtime_error("Cannot stat: " + p);
         size = (size_t)sb.st_size;
         if (size > 0)
         {
@@ -31,7 +32,7 @@ struct MmapFile
             if (data == MAP_FAILED)
             {
                 close(fd);
-                throw std::runtime_error("mmap failed: " + path);
+                throw std::runtime_error("mmap failed: " + p);
             }
             madvise((void *)data, size, MADV_SEQUENTIAL);
         }
