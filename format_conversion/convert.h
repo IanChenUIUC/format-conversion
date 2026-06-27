@@ -8,5 +8,7 @@ void convert_graph(const GraphDescriptor &input, const NodeDescriptor *nodes, co
                    EdgesFormat output_fmt)
 {
     DiGraphCsr<K, O> g = buildGraph<K, O>(input, nodes);
+    if (input.opts.sort_neighbors)
+        sortNeighbors(g, static_cast<int>(input.opts.num_threads));
     writeGraph(g, output_path, output_fmt, input.opts);
 }

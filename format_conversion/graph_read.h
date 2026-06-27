@@ -2,66 +2,16 @@
 
 #include "graph_io.h"
 
+#include <robin_hood.h>
+
 #include <charconv>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include <Graph.hxx>
-#include <io.hxx>
-#include <robin_hood.h>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
-// ─── Format enum ─────────────────────────────────────────────────────────────
-
-enum EdgesFormat
-{
-    CSV_EDGELIST,
-    METIS,
-    CSR_PARQUET
-};
-
-// ─── ParseOptions ────────────────────────────────────────────────────────────
-
-struct ParseOptions
-{
-    char sep = ',';
-    char comment_char = '#';
-    size_t skip_rows = 0;
-    size_t num_threads = 1;
-    uint64_t base_index = 0;
-    size_t id_column = 0;
-    size_t label_column = 0;
-};
-
-// ─── Descriptors ─────────────────────────────────────────────────────────────
-
-struct NodeDescriptor
-{
-    MmapFile mmap;
-    ParseOptions opts;
-
-    NodeDescriptor(const std::string &path, ParseOptions opts = {}) : mmap(path), opts(std::move(opts))
-    {
-    }
-};
-
-struct GraphDescriptor
-{
-    MmapFile mmap;
-    EdgesFormat fmt;
-    ParseOptions opts;
-
-    GraphDescriptor(const std::string &path, EdgesFormat fmt, ParseOptions opts = {})
-        : mmap(path), fmt(fmt), opts(std::move(opts))
-    {
-    }
-};
 
 // ─── NodeMap ─────────────────────────────────────────────────────────────────
 //
@@ -108,6 +58,12 @@ template <class K = uint32_t> struct NodeMap
     std::vector<size_t> line_offsets;
     const char *file_data = nullptr;
     size_t file_size = 0;
+
+    // The first non-data line of the node file (typically the column-name header,
+    // e.g. "node_id,name,weight"). Captured by buildNodeMap so writeNodelist can
+    // reproduce it verbatim. Empty when there is no header (dense mode, or a file
+    // that starts directly with data).
+    std::string header_row;
 
     NodeMap() = default; // Hash mode, empty (also the METIS/parquet placeholder).
     explicit NodeMap(K n) : mode(Mode::Dense), N(n)
@@ -167,10 +123,8 @@ template <class K = uint32_t> struct NodeMap
 
 template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
 {
-    // Array mode is used while  (max_id - min_id + 1) <= ratio * N. At 4x the
-    // remap array is <= 16 bytes/node — still far smaller than the edge arrays —
-    // so we keep it generous and only fall back to Hash for truly sparse ids.
-    static constexpr double MAX_REMAP_SPAN_RATIO = 4.0;
+    // Array mode is used while  (max_id - min_id + 1) <= ratio * N
+    static constexpr double MAX_REMAP_SPAN_RATIO = 2.0;
 
     NodeMap<K> nm;
     nm.file_data = nd.mmap.data;
@@ -186,8 +140,19 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
         p = nl ? nl + 1 : end;
     };
 
-    for (size_t i = 0; i < nd.opts.skip_rows && p < end; ++i)
+    // If skip_rows > 0 the caller is telling us the first line(s) are a header.
+    // Capture the very first skipped line verbatim so writeNodelist can re-emit it.
+    if (nd.opts.skip_rows > 0 && p < end)
+    {
+        const char *hl = p;
         skipLine();
+        const char *row_end = p > hl ? p - 1 : hl; // point at the '\n' we just passed
+        if (row_end > hl && *(row_end - 1) == '\r')
+            --row_end;
+        nm.header_row.assign(hl, row_end);
+        for (size_t i = 1; i < nd.opts.skip_rows && p < end; ++i)
+            skipLine();
+    }
 
     // Single pass: collect normalised ids + row offsets in file order.
     std::vector<K> ids;
@@ -229,6 +194,16 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
                 max_id = std::max(max_id, id);
             }
         }
+        else if (!have_any && nm.header_row.empty())
+        {
+            // First non-blank, non-comment line that isn't a valid integer: it's
+            // an implicit header (e.g. "node_id,name,weight"). Capture it once.
+            const char *nl = (const char *)memchr(line_start, '\n', end - line_start);
+            const char *row_end = nl ? nl : end;
+            if (row_end > line_start && *(row_end - 1) == '\r')
+                --row_end;
+            nm.header_row.assign(line_start, row_end);
+        }
         p = next;
         skipLine();
     }
@@ -266,15 +241,14 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
 //
 // The single per-edge parse+validate hot path, shared by every CSR build pass.
 // For each line in `blk` it parses (u_raw, v_raw), applies base_index, maps both
-// endpoints through the NodeMap, drops unknown endpoints and self-loops, and
-// invokes cb(u_compact, v_compact). The GVEL parser hardcodes ',' as the field
-// separator and '#'/'%' as comment markers.
+// endpoints through the NodeMap, drops unknown endpoints, and invokes
+// cb(u_compact, v_compact).
 
 template <class K, class Fn>
 inline void forEachValidEdge(std::string_view blk, const NodeMap<K> &nm, const ParseOptions &opts, Fn &&cb)
 {
     const uint64_t bias = opts.base_index;
-    readEdgelistFormatDoChecked<false, 0>(blk, /*symmetric=*/false, [&](int64_t ri, int64_t rj, double) {
+    auto fb = [&](int64_t ri, int64_t rj, double) {
         auto bi = static_cast<uint64_t>(ri), bj = static_cast<uint64_t>(rj);
         if (bi < bias || bj < bias)
             return;
@@ -282,54 +256,123 @@ inline void forEachValidEdge(std::string_view blk, const NodeMap<K> &nm, const P
         K v = nm.find(static_cast<K>(bj - bias));
         if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
             return;
-        if (u == v)
-            return; // skip self-loops
+        if (!opts.keep_self_loops && u == v)
+            return;
         cb(u, v);
-    });
+    };
+
+    switch (opts.sep)
+    {
+    case ',':
+        switch (opts.comment_char)
+        {
+        case '#':
+            readEdgelistFormatDoChecked<false, 0, ',', '#'>(blk, false, fb);
+        case '%':
+            readEdgelistFormatDoChecked<false, 0, ',', '%'>(blk, false, fb);
+        }
+    case '\t':
+        switch (opts.comment_char)
+        {
+        case '#':
+            readEdgelistFormatDoChecked<false, 0, '\t', '#'>(blk, false, fb);
+        case '%':
+            readEdgelistFormatDoChecked<false, 0, '\t', '%'>(blk, false, fb);
+        }
+    case ' ':
+        switch (opts.comment_char)
+        {
+        case '#':
+            readEdgelistFormatDoChecked<false, 0, '#', '#'>(blk, false, fb);
+        case '%':
+            readEdgelistFormatDoChecked<false, 0, '#', '%'>(blk, false, fb);
+        }
+    }
 }
 
-// ─── partitionIntoChunks ──────────────────────────────────────────────────────
+// ─── HugeArray ────────────────────────────────────────────────────────────────
 //
-// Split the file into T contiguous, line-aligned chunks that tile the data with
-// no gaps or overlaps. Chunk t is handled entirely by loop-iteration t in both
-// CSR passes, so a vertex's edges from chunk t always land in the same place.
+// 2 MB-aligned scratch buffer advised for transparent huge pages. The big random-
+// access arrays in the CSR build touch far more memory than the TLB can map with
+// 4 KB pages, so backing them with 2 MB pages cuts page-table-walk overhead.
+// Memory is left UNINITIALISED; the caller fills it in parallel so pages land on
+// the writing core's NUMA node (first-touch placement).
 
-inline std::vector<std::string_view> partitionIntoChunks(std::string_view data, int T)
+template <class T> struct HugeArray
 {
-    std::vector<std::string_view> chunks;
-    chunks.reserve(T);
-    const size_t DS = data.size();
-    const size_t step = T > 0 ? (DS + static_cast<size_t>(T) - 1) / static_cast<size_t>(T) : DS;
-    for (int t = 0; t < T; ++t)
+    T *p = nullptr;
+    explicit HugeArray(size_t count)
     {
-        size_t b = static_cast<size_t>(t) * step;
-        if (b >= DS)
-        {
-            chunks.emplace_back(); // empty tail chunk (DS not divisible by T)
-            continue;
-        }
-        chunks.push_back(readEdgelistFormatBlock(data, b, step));
+        if (posix_memalign(reinterpret_cast<void **>(&p), size_t{1} << 21, count * sizeof(T)) != 0)
+            throw std::bad_alloc();
+#ifdef MADV_HUGEPAGE
+        madvise(p, count * sizeof(T), MADV_HUGEPAGE);
+#endif
     }
-    return chunks;
+    ~HugeArray()
+    {
+        std::free(p);
+    }
+    HugeArray(const HugeArray &) = delete;
+    HugeArray &operator=(const HugeArray &) = delete;
+    T *data() const
+    {
+        return p;
+    }
+};
+
+inline void adviseHugePages(void *p, size_t bytes)
+{
+#ifdef MADV_HUGEPAGE
+    if (p && bytes)
+        madvise(p, bytes, MADV_HUGEPAGE);
+#else
+    (void)p;
+    (void)bytes;
+#endif
+}
+
+// ─── forEachValidEdgeStripe ───────────────────────────────────────────────────
+//
+// Drive forEachValidEdge over thread t's stripe of the file. The file is cut into
+// fixed CSR_BLOCK_BYTES line-aligned blocks (a tiling: every line lands in exactly
+// one block); thread t owns blocks t, t+T, t+2T, … . Round-robin assignment
+// interleaves dense and sparse regions across threads so one heavy region can't
+// stall a whole pass. The assignment depends only on (t, T), so a vertex's edges
+// from a given block always go through the same per-thread cursor in both passes.
+
+inline constexpr size_t CSR_BLOCK_BYTES = 1u << 20; // 1 MB
+
+template <class K, class Fn>
+inline void forEachValidEdgeStripe(std::string_view data, int t, int T, size_t nblocks, const NodeMap<K> &nm,
+                                   const ParseOptions &opts, Fn &&cb)
+{
+    for (size_t b = static_cast<size_t>(t); b < nblocks; b += static_cast<size_t>(T))
+    {
+        auto blk = readEdgelistFormatBlock(data, b * CSR_BLOCK_BYTES, CSR_BLOCK_BYTES);
+        forEachValidEdge(blk, nm, opts, cb);
+    }
 }
 
 // ─── buildCSRFromCSV ──────────────────────────────────────────────────────────
 //
 // Two-pass, atomic-free CSR build from a CSV edge list. Works for any thread
-// count: T == 1 is just the T-chunk algorithm with a single chunk.
+// count: T == 1 is just the striped algorithm with a single stripe.
 //
-// The file is split into T contiguous chunks (one per loop iteration). Each
-// chunk keeps its OWN degree row, so no two iterations write the same counter —
-// no atomics. After pass 1 we know, per vertex v, exactly how many edges each
-// chunk contributes, so we can hand each chunk a private, disjoint slice of v's
-// adjacency region. Pass 2 then scatters with plain stores, again atomic-free.
+// The file is cut into 1 MB line-aligned blocks, assigned round-robin to threads.
+// Each thread keeps its OWN row in the degree table, so no two threads write the
+// same counter — no atomics. After pass 1 we know, per vertex v, exactly how many
+// edges each thread contributes, so each thread gets a private, disjoint slice of
+// v's adjacency region. Pass 2 then scatters with plain stores, again atomic-free.
 //
-//   Pass 1:  tdeg[t][v] = # endpoints at v contributed by chunk t.
+//   Pass 1:  tdeg[t·N + v] = # endpoints at v contributed by thread t's blocks.
 //   Offsets: offsets[v] = prefix sum of total degree; then overwrite tdeg in
-//            place so tdeg[t][v] becomes chunk t's write cursor into v's region.
-//   Pass 2:  edgeKeys[tdeg[t][u]++] = v   (and symmetrically for v).
+//            place so tdeg[t·N + v] becomes thread t's write cursor into v.
+//   Pass 2:  edgeKeys[tdeg[t·N + u]++] = v   (and symmetrically for v).
 //
-// Scratch memory is T * N * sizeof(O) for the degree/cursor table.
+// The degree/cursor table is one flat T × N buffer (row-major by thread, so each
+// thread's row is disjoint — no false sharing). It is huge-page-advised and
+// first-touched in parallel. Scratch memory is T × N × sizeof(O).
 
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const ParseOptions &opts)
@@ -339,10 +382,10 @@ DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const Pa
         throw std::runtime_error("comment_char: not yet implemented for chars other than '#' and '%'");
 
     const int T = opts.num_threads > 1 ? static_cast<int>(opts.num_threads) : 1;
-    auto chunks = partitionIntoChunks(data, T);
+    const size_t nblocks = (data.size() + CSR_BLOCK_BYTES - 1) / CSR_BLOCK_BYTES;
 
     // Dense mode (no node file): discover N = max(compact id) + 1 first, since we
-    // must size the degree table before counting. Parallel max-reduction.
+    // must size the degree table before counting.
     if (nm.isDense() && nm.N == 0)
     {
         std::vector<K> tmax(T, K{});
@@ -350,7 +393,7 @@ DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const Pa
         for (int t = 0; t < T; ++t)
         {
             K m = K{};
-            forEachValidEdge(chunks[t], nm, opts, [&](K u, K v) { m = std::max({m, u, v}); });
+            forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, [&](K u, K v) { m = std::max({m, u, v}); });
             tmax[t] = m;
         }
         K N = K{};
@@ -359,14 +402,25 @@ DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const Pa
         nm.N = static_cast<K>(N + 1);
     }
     const K N = nm.N;
+    const size_t TN = static_cast<size_t>(T) * N;
 
-    // ── Pass 1: per-chunk degree counts (no shared writes) ─────────────────────
-    std::vector<std::vector<O>> tdeg(T, std::vector<O>(N, O{}));
+    // Flat T × N degree/cursor table: row t is tdeg[t·N .. (t+1)·N).
+    HugeArray<O> tdeg(TN);
+    O *td = tdeg.data();
+
+    // First-touch zero in parallel: thread t zeroes (and thus places) its own row.
+    // Static schedule gives iteration t to the same physical thread here and in the
+    // passes below, so the row is local to the core that uses it.
+#pragma omp parallel for num_threads(T) schedule(static)
+    for (int t = 0; t < T; ++t)
+        std::memset(td + static_cast<size_t>(t) * N, 0, static_cast<size_t>(N) * sizeof(O));
+
+    // ── Pass 1: per-thread degree counts (no shared writes) ────────────────────
 #pragma omp parallel for num_threads(T) schedule(static)
     for (int t = 0; t < T; ++t)
     {
-        auto &deg = tdeg[t];
-        forEachValidEdge(chunks[t], nm, opts, [&](K u, K v) {
+        O *deg = td + static_cast<size_t>(t) * N;
+        forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, [&](K u, K v) {
             ++deg[u];
             ++deg[v];
         });
@@ -380,31 +434,35 @@ DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const Pa
     {
         g.offsets[v] = total;
         for (int t = 0; t < T; ++t)
-            total += tdeg[t][v];
+            total += td[static_cast<size_t>(t) * N + v];
     }
     g.offsets[N] = total;
 
-    // ── Turn tdeg into per-chunk write cursors (in place) ──────────────────────
-    // cursor[t][v] = offsets[v] + sum over chunks before t of their degree at v.
+    // ── Turn tdeg into per-thread write cursors (in place) ─────────────────────
+    // cursor[t·N + v] = offsets[v] + sum over threads before t of their degree at v.
 #pragma omp parallel for num_threads(T) schedule(static)
     for (K v = 0; v < N; ++v)
     {
         O base = g.offsets[v];
         for (int t = 0; t < T; ++t)
         {
-            O d = tdeg[t][v];
-            tdeg[t][v] = base;
+            size_t i = static_cast<size_t>(t) * N + v;
+            O d = td[i];
+            td[i] = base;
             base += d;
         }
     }
 
     // ── Pass 2: scatter into disjoint slices (no shared writes) ────────────────
+    // Pass 2 writes every slot exactly once, so edgeKeys needs no zero-init value;
+    // huge-page advice helps the random scatter regardless of who faults the pages.
     g.edgeKeys.resize(static_cast<size_t>(total));
+    adviseHugePages(g.edgeKeys.data(), g.edgeKeys.size() * sizeof(K));
 #pragma omp parallel for num_threads(T) schedule(static)
     for (int t = 0; t < T; ++t)
     {
-        auto &cur = tdeg[t];
-        forEachValidEdge(chunks[t], nm, opts, [&](K u, K v) {
+        O *cur = td + static_cast<size_t>(t) * N;
+        forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, [&](K u, K v) {
             g.edgeKeys[cur[u]++] = v;
             g.edgeKeys[cur[v]++] = u;
         });
@@ -445,7 +503,8 @@ DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const ParseOptions &
     p = r1.ptr;
     while (p < end && (*p == ' ' || *p == '\t'))
         ++p;
-    (void)std::from_chars(p, end, M);
+    auto r2 = std::from_chars(p, end, M);
+    (void)r2;
     skipLine();
 
     DiGraphCsr<K, O> g;
@@ -484,7 +543,8 @@ DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const ParseOptions &
 // ─── readParquetColumn ───────────────────────────────────────────────────────
 //
 // Reads a single named column from a Parquet file into a std::vector<T>.
-// Handles both uint32 and uint64 stored columns.
+// Handles both uint32 and uint64 stored columns. Arrow headers are only needed
+// here, so they are pulled in just above the function.
 
 #include <arrow/api.h>
 #include <arrow/io/file.h>
@@ -517,14 +577,22 @@ template <class T> std::vector<T> readParquetColumn(const std::string &path, con
     return result;
 }
 
-// ─── buildGraph ──────────────────────────────────────────────────────────────
-
-template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
+template <class K, class O> void sortNeighbors(DiGraphCsr<K, O> &g, int num_threads = 0)
 {
-    NodeMap<K> nm;
-    return buildGraph<K, O>(gd, nd, nm);
+    const size_t N = g.span();
+#ifdef _OPENMP
+    const int T = num_threads > 0 ? num_threads : omp_get_max_threads();
+#else
+    const int T = 1;
+    (void)num_threads;
+#endif
+    K *keys = g.edgeKeys.data();
+#pragma omp parallel for num_threads(T) schedule(dynamic, 1024)
+    for (size_t v = 0; v < N; ++v)
+        std::sort(keys + g.offsets[v], keys + g.offsets[v + 1]);
 }
+
+// ─── buildGraph ──────────────────────────────────────────────────────────────
 
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd, NodeMap<K> &nm)
@@ -564,6 +632,13 @@ DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd,
     default:
         throw std::runtime_error("buildGraph: unknown format");
     }
+}
+
+template <class K = uint32_t, class O = uint64_t>
+DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
+{
+    NodeMap<K> nm;
+    return buildGraph<K, O>(gd, nd, nm);
 }
 
 // ─── buildLabelMap ────────────────────────────────────────────────────────────

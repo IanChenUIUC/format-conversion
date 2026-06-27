@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <fcntl.h>
 #include <stdexcept>
 #include <string>
@@ -7,6 +8,13 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include <Graph.hxx>
+#include <io.hxx>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // RAII wrapper around a read-only memory-mapped file.
 // Calls madvise(MADV_SEQUENTIAL) on open; safe for zero-byte files.
@@ -59,5 +67,53 @@ struct MmapFile
     std::string_view view() const
     {
         return {data, size};
+    }
+};
+
+// ─── EdgesFormat  ─────────────────────────────────────────────────────────────
+
+enum EdgesFormat
+{
+    CSV_EDGELIST,
+    METIS,
+    CSR_PARQUET
+};
+
+// ─── ParseOptions ────────────────────────────────────────────────────────────
+
+struct ParseOptions
+{
+    char sep = ',';
+    char comment_char = '#';
+    bool keep_self_loops = false;
+    size_t skip_rows = 0;
+    size_t num_threads = 1;
+    uint64_t base_index = 0;
+    size_t id_column = 0;
+    size_t label_column = 0;
+    bool sort_neighbors = false;
+};
+
+// ─── Descriptors ─────────────────────────────────────────────────────────────
+
+struct NodeDescriptor
+{
+    MmapFile mmap;
+    ParseOptions opts;
+
+    NodeDescriptor(const std::string &path, ParseOptions opts = {}) : mmap(path), opts(std::move(opts))
+    {
+    }
+};
+
+struct GraphDescriptor
+{
+    MmapFile mmap;
+    EdgesFormat fmt;
+    ParseOptions opts;
+
+    GraphDescriptor(const std::string &path, EdgesFormat fmt, ParseOptions opts = {})
+        : mmap(path), fmt(fmt), opts(std::move(opts))
+    {
     }
 };

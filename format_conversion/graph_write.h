@@ -1,6 +1,6 @@
 #pragma once
 
-#include "graph_read.h"
+#include "graph_io.h"
 
 #include <bit>
 #include <charconv>
@@ -14,6 +14,7 @@
 #include <arrow/api.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/writer.h>
+#include <parquet/properties.h>
 
 // ─── numDigits ───────────────────────────────────────────────────────────────
 //
@@ -155,39 +156,63 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
 // ─── writeGraphToParquet ─────────────────────────────────────────────────────
 //
 // Writes two single-column Parquet files:
-//   {output_path}.indices.parquet  — neighbor IDs (always uint64 for downstream compat)
-//   {output_path}.indptr.parquet   — CSR offset array (uint64, zero-copy)
+//   {output_path}.indices.parquet  — neighbor IDs, width = K (uint32 by default)
+//   {output_path}.indptr.parquet   — CSR offset array (uint64)
 //
-// The indices are cast from K (typically uint32) to uint64 at write time.
-// This costs one vector copy but avoids any ambiguity for consumers.
+// Both columns are wrapped ZERO-COPY straight from the in-memory CSR vectors —
+// no cast, no temporary. (The old writer cast K → uint64 into a separate vector,
+// which at scale meant a 150 GB allocation + copy and doubled the bytes on disk.
+// Indices are now written at their native K width; a downstream stage can widen
+// to uint64 if some consumer requires it.)
+//
+// These Parquet files are the long-term, on-disk representation, so they are
+// tuned for SIZE: delta encoding + zstd. Dictionary encoding stays off (indices
+// are high-cardinality — a dictionary is pure overhead at large N). Delta encoding
+// (DELTA_BINARY_PACKED) shrinks both columns: monotonic indptr collapses to its
+// gaps (degrees), and indices benefit further when adjacency lists are sorted
+// (see ParseOptions::sort_neighbors). Statistics are kept (cheap, and enable page
+// skipping for range queries). For a low-latency / zero-copy consumer, convert
+// these to Feather/Arrow IPC instead — that is the throughput-oriented format.
 
 template <class K, class O>
 void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions & = {})
 {
     static_assert(sizeof(O) == 8, "offsets (O) must be uint64_t");
+    static_assert(sizeof(K) == 4 || sizeof(K) == 8, "indices (K) must be 32- or 64-bit unsigned");
 
-    // Helper: wrap an array as a single-column Parquet table and write to disk.
-    auto writeColumn = [](const std::string &path, const std::string &col_name, std::shared_ptr<arrow::Array> arr) {
+    parquet::WriterProperties::Builder pb;
+    pb.disable_dictionary();
+    pb.encoding(parquet::Encoding::DELTA_BINARY_PACKED);
+    pb.compression(arrow::Compression::ZSTD);
+    auto props = pb.build();
+    auto arrow_props = parquet::default_arrow_writer_properties();
+
+    // Large row groups keep per-group overhead negligible; Parquet still streams
+    // pages within a group, so this does not buffer the whole column.
+    constexpr int64_t kRowGroup = int64_t{1} << 24; // 16Mi rows
+
+    // Wrap a contiguous vector as a single-column Parquet table and stream it out.
+    auto writeColumn = [&](const std::string &path, const std::string &col_name, std::shared_ptr<arrow::Array> arr) {
         auto table = arrow::Table::Make(arrow::schema({arrow::field(col_name, arr->type())}), {arr});
         auto out = arrow::io::FileOutputStream::Open(path).ValueOrDie();
-        PARQUET_THROW_NOT_OK(parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), out));
+        PARQUET_THROW_NOT_OK(
+            parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), out, kRowGroup, props, arrow_props));
         PARQUET_THROW_NOT_OK(out->Close());
     };
 
-    // Indices: cast K → uint64 (explicit copy so all consumers see the same type).
-    {
-        std::vector<uint64_t> indices64(g.edgeKeys.begin(), g.edgeKeys.end());
-        auto buf = arrow::Buffer::Wrap(indices64.data(), indices64.size() * sizeof(uint64_t));
-        auto dat = arrow::ArrayData::Make(arrow::uint64(), (int64_t)indices64.size(), {nullptr, buf});
-        writeColumn(output_path + ".indices.parquet", "indices", arrow::MakeArray(dat));
-    } // indices64 freed here — Buffer::Wrap is synchronous so data is safe throughout
+    // Zero-copy: build an Arrow array that references the vector's memory directly.
+    // The Buffer is non-owning, so the source vector must outlive the write (it does).
+    auto wrapZeroCopy = [](const auto *vec_data, int64_t len, std::shared_ptr<arrow::DataType> type) {
+        auto buf = arrow::Buffer::Wrap(vec_data, static_cast<size_t>(len));
+        auto ad = arrow::ArrayData::Make(std::move(type), len, {nullptr, buf});
+        return arrow::MakeArray(ad);
+    };
 
-    // Offsets: O == uint64_t, so wrap directly (zero-copy).
-    {
-        auto buf = arrow::Buffer::Wrap(g.offsets.data(), g.offsets.size() * sizeof(O));
-        auto dat = arrow::ArrayData::Make(arrow::uint64(), (int64_t)g.offsets.size(), {nullptr, buf});
-        writeColumn(output_path + ".indptr.parquet", "indptr", arrow::MakeArray(dat));
-    }
+    auto idx_type = sizeof(K) == 4 ? arrow::uint32() : arrow::uint64();
+    writeColumn(output_path + ".indices.parquet", "indices",
+                wrapZeroCopy(g.edgeKeys.data(), static_cast<int64_t>(g.edgeKeys.size()), idx_type));
+    writeColumn(output_path + ".indptr.parquet", "indptr",
+                wrapZeroCopy(g.offsets.data(), static_cast<int64_t>(g.offsets.size()), arrow::uint64()));
 }
 
 // ─── writeGraphToCSV ─────────────────────────────────────────────────────────

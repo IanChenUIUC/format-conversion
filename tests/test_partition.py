@@ -13,7 +13,7 @@ import sys
 import pytest
 from pathlib import Path
 from .formats import FORMATS, Format
-from .helpers import write_edgelist, read_nodelist, read_nodelist_rows
+from .helpers import write_edgelist, read_nodelist, read_nodelist_rows, read_nodelist_header
 
 try:
     from format_conversion.format import (
@@ -103,6 +103,13 @@ class TestPartitionCorrectness:
 
             # All columns: verbatim row preservation (only checked for multi-column specs)
             if spec.node_attrs is not None:
+                # The output header must carry all column names, not just "node_id".
+                expected_header = ["node_id"] + (spec.node_attr_header or [])
+                written_header = read_nodelist_header(nodelist_path)
+                assert written_header == expected_header, (
+                    f"label {label}: header {written_header!r} != expected {expected_header!r}"
+                )
+
                 expected_rows = {
                     row[0]: row
                     for row in spec.label_node_rows()[label]

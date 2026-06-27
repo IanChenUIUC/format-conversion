@@ -25,7 +25,15 @@ template <class K> void writeNodelist(const std::string &path, const std::vector
     std::ofstream f(path);
     if (!f)
         throw std::runtime_error("Cannot create nodelist: " + path);
-    f << "node_id\n";
+
+    // Re-emit the header from the source node file (e.g. "node_id,name,weight").
+    // If no header was captured (dense mode, or a file with no header row), fall
+    // back to the minimal single-column header so the file is always readable.
+    if (!nm.header_row.empty())
+        f << nm.header_row << '\n';
+    else
+        f << "node_id\n";
+
     for (K u : verts)
     {
         auto row = nm.getRow(u);

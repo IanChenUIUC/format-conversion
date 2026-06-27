@@ -107,6 +107,12 @@ def read_nodelist(path: Path, header: bool = True) -> list[int]:
     return nodes
 
 
+def read_nodelist_header(path: Path) -> list[str]:
+    """Return the column names from the first line of a nodelist CSV."""
+    with open(path) as f:
+        return f.readline().rstrip("\n").split(",")
+
+
 def read_nodelist_rows(path: Path, header: bool = True) -> list[list[str]]:
     """Read all columns of a nodelist CSV, returning rows as lists of strings."""
     rows = []
