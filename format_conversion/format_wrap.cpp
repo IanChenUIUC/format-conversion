@@ -29,8 +29,7 @@ PYBIND11_MODULE(format, m)
         .def_readwrite("skip_rows", &ParseOptions::skip_rows)
         .def_readwrite("num_threads", &ParseOptions::num_threads)
         .def_readwrite("base_index", &ParseOptions::base_index)
-        .def_readwrite("id_column", &ParseOptions::id_column)
-        .def_readwrite("label_column", &ParseOptions::label_column)
+        .def_readwrite("keep_self_loops", &ParseOptions::keep_self_loops)
         .def_readwrite("sort_neighbors", &ParseOptions::sort_neighbors);
 
     // ── NodeDescriptor ───────────────────────────────────────────────────────

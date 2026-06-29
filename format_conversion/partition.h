@@ -10,15 +10,8 @@
 #include <limits>
 #include <string>
 
-// ─── writeNodelist ────────────────────────────────────────────────────────────
-//
-// Writes nodes.csv for one partition label.
-// verts: global compact IDs belonging to this label, in local-ID order.
-// nm:    NodeMap built from the input NodeDescriptor.
-//   - Sparse mode (node file provided): nm.getRow(u) returns the verbatim input
-//     CSV row (including any extra columns), written directly.
-//   - Dense mode (no node file): nm.getRow(u) returns empty; we write u instead.
-// Always writes a "node_id" header so consumers can skip it uniformly.
+// Write nodes.csv for one partition label: the node list's header followed by each
+// vertex's verbatim source row (or its id, in dense mode), in local-id order.
 
 template <class K> void writeNodelist(const std::string &path, const std::vector<K> &verts, const NodeMap<K> &nm)
 {
@@ -26,9 +19,7 @@ template <class K> void writeNodelist(const std::string &path, const std::vector
     if (!f)
         throw std::runtime_error("Cannot create nodelist: " + path);
 
-    // Re-emit the header from the source node file (e.g. "node_id,name,weight").
-    // If no header was captured (dense mode, or a file with no header row), fall
-    // back to the minimal single-column header so the file is always readable.
+    // Re-emit the source header, or a minimal one if the input had none.
     if (!nm.header_row.empty())
         f << nm.header_row << '\n';
     else
@@ -45,19 +36,8 @@ template <class K> void writeNodelist(const std::string &path, const std::vector
     }
 }
 
-// ─── extractSubgraphs ────────────────────────────────────────────────────────
-//
-// Extracts sub-CSRs for a batch of labels simultaneously in two passes.
-//
-// label_verts: pre-built map L → sorted vector of global compact IDs.
-//              Passed in so partition_graph can reuse it across batches.
-// batch:       which labels to extract in this call (a subset of label_verts).
-//
-// Local IDs within each sub-graph follow the ordering in label_verts[L]:
-//   local_id = position of global compact ID in label_verts[L].
-//
-// Memory: local_id array (N × K) + write_pos cursors (N × O total across batch).
-//   Peak for the edgeKeys across all D labels ≤ total intra-label edges ≤ |E|.
+// Extract sub-CSRs for a batch of labels in two passes. Local ids follow each
+// label's vertex order in label_verts. See DESIGN.md for the memory model.
 
 template <class K, class O, class L>
 robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> extractSubgraphs(
@@ -67,8 +47,7 @@ robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> extractSubgraphs(
     static constexpr K INVALID = std::numeric_limits<K>::max();
     K N = static_cast<K>(g.span());
 
-    // Build local_id[u] = position of u in its label's vertex list.
-    // Vertices whose label is not in this batch get INVALID.
+    // local_id[u] = position of u in its label's vertex list (INVALID if not in batch).
     std::vector<K> local_id(N, INVALID);
     {
         robin_hood::unordered_flat_map<L, K> count;
@@ -82,7 +61,7 @@ robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> extractSubgraphs(
         }
     }
 
-    // Initialise sub-CSR offsets to zero; they double as degree arrays in pass 1.
+    // Offsets start at zero; they double as degree arrays in pass 1.
     robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> result;
     for (const L &lab : batch)
     {
@@ -90,7 +69,7 @@ robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> extractSubgraphs(
         result[lab].offsets.assign(N_L + 1, O{});
     }
 
-    // ── Pass 1: count intra-label degrees ─────────────────────────────────────
+    // Pass 1: count intra-label degrees.
     for (K u = 0; u < N; ++u)
     {
         auto it = result.find(labels[u]);
@@ -104,7 +83,7 @@ robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> extractSubgraphs(
         });
     }
 
-    // ── Prefix sums → proper offsets; allocate edgeKeys ───────────────────────
+    // Prefix sums → offsets; allocate edgeKeys.
     robin_hood::unordered_flat_map<L, std::vector<O>> write_pos;
     for (auto &[lab, sub] : result)
     {
@@ -121,7 +100,7 @@ robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> extractSubgraphs(
         write_pos[lab].assign(sub.offsets.begin(), sub.offsets.begin() + N_L);
     }
 
-    // ── Pass 2: scatter edges into sub-CSRs ───────────────────────────────────
+    // Pass 2: scatter edges into sub-CSRs.
     for (K u = 0; u < N; ++u)
     {
         auto it = result.find(labels[u]);
@@ -139,32 +118,24 @@ robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> extractSubgraphs(
     return result;
 }
 
-// ─── partition_graph ─────────────────────────────────────────────────────────
-//
-// Full pipeline:
-//   buildGraph (with NodeMap) → buildLabelMap → batch loop of extractSubgraphs
-//   → writeGraph + writeNodelist per label per batch.
-//
-// batch_size controls how many sub-CSRs are materialised simultaneously.
-// defaults to all labels at once. Memory scales linearly with batch_size;
-// see extractSubgraphs for details.
+// Partition a graph by per-node label, writing a sub-graph + node list per label.
+// batch_size caps how many sub-CSRs are materialised at once (0 = all labels);
+// memory scales with it. See DESIGN.md.
 
 template <class K = uint32_t, class O = uint64_t, class L = int32_t>
 void partition_graph(const GraphDescriptor &input, const NodeDescriptor *nodes, const std::string &labels_path,
                      const ParseOptions &label_opts, const std::string &output_dir, EdgesFormat output_fmt,
                      size_t batch_size = std::numeric_limits<size_t>::max())
 {
-    // ── 1. Build graph + NodeMap ───────────────────────────────────────────────
+    // 1. Build graph + NodeMap.
     NodeMap<K> nm;
     auto g = buildGraph<K, O>(input, nodes, nm);
     K N = static_cast<K>(g.span());
 
-    // ── 2. Load labels ────────────────────────────────────────────────────────
+    // 2. Load labels.
     auto labels = buildLabelMap<L>(labels_path, N, label_opts);
 
-    // ── 3. Build label_verts and sorted unique label list ─────────────────────
-    // label_verts[L] = global compact IDs for label L, in compact-ID order.
-    // Ordering is automatic: we iterate u = 0..N-1 and push_back in order.
+    // 3. Build label_verts[L] = compact ids for label L, in compact-id order.
     robin_hood::unordered_flat_map<L, std::vector<K>> label_verts;
     for (K u = 0; u < N; ++u)
         label_verts[labels[u]].push_back(u);
@@ -177,7 +148,7 @@ void partition_graph(const GraphDescriptor &input, const NodeDescriptor *nodes, 
 
     std::filesystem::create_directories(output_dir);
 
-    // ── 4. Extract and write in batches of size D ─────────────────────────────
+    // 4. Extract and write in batches.
     for (size_t i = 0; i < unique_labels.size(); i += batch_size)
     {
         size_t end_idx = std::min(i + batch_size, unique_labels.size());

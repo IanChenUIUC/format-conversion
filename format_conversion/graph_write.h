@@ -1,12 +1,13 @@
 #pragma once
 
-#include "graph_io.h"
+#include "formats.h"
+
+#include <Graph.hxx>
 
 #include <bit>
 #include <charconv>
 #include <cstring>
 #include <fcntl.h>
-#include <fstream>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <vector>
@@ -16,163 +17,108 @@
 #include <parquet/arrow/writer.h>
 #include <parquet/properties.h>
 
-// ─── numDigits ───────────────────────────────────────────────────────────────
-//
-// Branchless decimal digit count for n >= 1.
-// 1233/4096 ≈ log10(2); correction term handles all boundary values exactly.
-// Compiles to: lzcnt, imul, shr, cmp, add.
+// Branchless decimal digit count for n >= 0 (used to size output buffers).
 
 inline uint32_t numDigits(uint32_t n)
 {
     static constexpr uint32_t pow10[] = {1u,      10u,      100u,      1000u,      10000u,
                                          100000u, 1000000u, 10000000u, 100000000u, 1000000000u};
     uint32_t t = (std::bit_width(n) * 1233u) >> 12;
-    return t + (n >= pow10[t]);
+    return (n == 0) ? 1u : t + (n >= pow10[t]);
 }
 
-// ─── writeGraphToMetis ───────────────────────────────────────────────────────
-//
-// Two-pass write: first compute per-vertex line byte lengths (to know the
-// total file size for pre-allocation), then fill the mmap'd output in a
-// second pass. Single-threaded when opts.num_threads == 1 (the default);
-// parallel when num_threads > 1 (both passes use the same thread count).
-
-template <class K, class O>
-void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
+// Two-pass, byte-exact, parallel writer of a text file. For each u in [0, n),
+// lineBytes(u) returns the number of bytes u contributes and writeLine(u, p)
+// writes exactly that many bytes starting at p. An optional header is written
+// first. Shared by the METIS and CSV writers.
+template <class LineBytes, class WriteLine>
+void writeLinesMmap(const std::string &path, size_t n, std::string_view header, LineBytes lineBytes,
+                    WriteLine writeLine, size_t num_threads)
 {
-    size_t n = g.span(), m = g.size() / 2;
-    char header[64];
-    int hlen = snprintf(header, sizeof(header), "%zu %zu\n", n, m);
+    const int T = num_threads > 1 ? static_cast<int>(num_threads) : 1;
 
-    // ── Pass 1: compute per-vertex line byte lengths ──────────────────────────
-    std::vector<size_t> line_bytes(n);
-
-    auto computeLineSizes = [&](size_t u_begin, size_t u_end) {
-        for (size_t u = u_begin; u < u_end; ++u)
-        {
-            size_t bytes = 1; // newline
-            bool first = true;
-            g.forEachEdgeKey((K)u, [&](K v) {
-                if (!first)
-                    ++bytes; // space separator
-                bytes += numDigits((uint32_t)(v + 1));
-                first = false;
-            });
-            line_bytes[u] = bytes;
-        }
-    };
-
-    if (opts.num_threads <= 1)
+    std::vector<size_t> off(n + 1);
+    off[0] = header.size();
     {
-        computeLineSizes(0, n);
-    }
-    else
-    {
-#pragma omp parallel for num_threads(opts.num_threads) schedule(dynamic, 2048)
+        std::vector<size_t> bytes(n);
+#pragma omp parallel for num_threads(T) schedule(dynamic, 2048)
         for (size_t u = 0; u < n; ++u)
-        {
-            size_t bytes = 1;
-            bool first = true;
-            g.forEachEdgeKey((K)u, [&](K v) {
-                if (!first)
-                    ++bytes;
-                bytes += numDigits((uint32_t)(v + 1));
-                first = false;
-            });
-            line_bytes[u] = bytes;
-        }
+            bytes[u] = lineBytes(u);
+        for (size_t u = 0; u < n; ++u)
+            off[u + 1] = off[u] + bytes[u];
     }
+    const size_t total = off[n];
 
-    // ── Prefix sum → per-vertex byte offsets ─────────────────────────────────
-    std::vector<size_t> line_off(n + 1);
-    line_off[0] = (size_t)hlen;
-    for (size_t i = 0; i < n; ++i)
-        line_off[i + 1] = line_off[i] + line_bytes[i];
-    std::vector<size_t>().swap(line_bytes);
-
-    size_t total = line_off[n];
-    std::string out_path = output_path + ".metis";
-    int fd = open(out_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
+    int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
-        throw std::runtime_error("Cannot create: " + out_path);
-    if (posix_fallocate(fd, 0, (off_t)total) != 0)
+        throw std::runtime_error("Cannot create: " + path);
+    if (total == 0)
     {
         close(fd);
-        throw std::runtime_error("posix_fallocate failed: " + out_path);
+        return;
     }
-    char *buf = (char *)mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (posix_fallocate(fd, 0, static_cast<off_t>(total)) != 0)
+    {
+        close(fd);
+        throw std::runtime_error("posix_fallocate failed: " + path);
+    }
+    char *buf = static_cast<char *>(mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
     if (buf == MAP_FAILED)
     {
         close(fd);
-        throw std::runtime_error("mmap failed: " + out_path);
+        throw std::runtime_error("mmap failed: " + path);
     }
+    if (!header.empty())
+        memcpy(buf, header.data(), header.size());
 
-    memcpy(buf, header, hlen);
-
-    // ── Pass 2: write adjacency lines ─────────────────────────────────────────
-    auto writeLines = [&](size_t u_begin, size_t u_end) {
-        for (size_t u = u_begin; u < u_end; ++u)
-        {
-            char *p = buf + line_off[u];
-            bool first = true;
-            g.forEachEdgeKey((K)u, [&](K v) {
-                if (!first)
-                    *p++ = ' ';
-                auto [ptr, _] = std::to_chars(p, p + 11, (uint32_t)(v + 1));
-                p = ptr;
-                first = false;
-            });
-            *p = '\n';
-        }
-    };
-
-    if (opts.num_threads <= 1)
-    {
-        writeLines(0, n);
-    }
-    else
-    {
-#pragma omp parallel for num_threads(opts.num_threads) schedule(dynamic, 2048)
-        for (size_t u = 0; u < n; ++u)
-        {
-            char *p = buf + line_off[u];
-            bool first = true;
-            g.forEachEdgeKey((K)u, [&](K v) {
-                if (!first)
-                    *p++ = ' ';
-                auto [ptr, _] = std::to_chars(p, p + 11, (uint32_t)(v + 1));
-                p = ptr;
-                first = false;
-            });
-            *p = '\n';
-        }
-    }
+#pragma omp parallel for num_threads(T) schedule(dynamic, 2048)
+    for (size_t u = 0; u < n; ++u)
+        writeLine(u, buf + off[u]);
 
     msync(buf, total, MS_SYNC);
     munmap(buf, total);
     close(fd);
 }
 
-// ─── writeGraphToParquet ─────────────────────────────────────────────────────
-//
-// Writes two single-column Parquet files:
-//   {output_path}.indices.parquet  — neighbor IDs, width = K (uint32 by default)
-//   {output_path}.indptr.parquet   — CSR offset array (uint64)
-//
-// Both columns are wrapped ZERO-COPY straight from the in-memory CSR vectors —
-// no cast, no temporary. (The old writer cast K → uint64 into a separate vector,
-// which at scale meant a 150 GB allocation + copy and doubled the bytes on disk.
-// Indices are now written at their native K width; a downstream stage can widen
-// to uint64 if some consumer requires it.)
-//
-// These Parquet files are the long-term, on-disk representation, so they are
-// tuned for SIZE: delta encoding + zstd. Dictionary encoding stays off (indices
-// are high-cardinality — a dictionary is pure overhead at large N). Delta encoding
-// (DELTA_BINARY_PACKED) shrinks both columns: monotonic indptr collapses to its
-// gaps (degrees), and indices benefit further when adjacency lists are sorted
-// (see ParseOptions::sort_neighbors). Statistics are kept (cheap, and enable page
-// skipping for range queries). For a low-latency / zero-copy consumer, convert
-// these to Feather/Arrow IPC instead — that is the throughput-oriented format.
+// Write the CSR as a METIS adjacency-list file. Parallelised over num_threads.
+
+template <class K, class O>
+void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
+{
+    const size_t n = g.span(), m = g.size() / 2;
+    char header[64];
+    int hlen = snprintf(header, sizeof(header), "%zu %zu\n", n, m);
+
+    auto lineBytes = [&](size_t u) {
+        size_t bytes = 1; // trailing newline
+        bool first = true;
+        g.forEachEdgeKey((K)u, [&](K v) {
+            if (!first)
+                ++bytes; // space separator
+            bytes += numDigits((uint32_t)(v + 1));
+            first = false;
+        });
+        return bytes;
+    };
+    auto writeLine = [&](size_t u, char *p) {
+        bool first = true;
+        g.forEachEdgeKey((K)u, [&](K v) {
+            if (!first)
+                *p++ = ' ';
+            auto [ptr, _] = std::to_chars(p, p + 11, (uint32_t)(v + 1)); // 1-indexed
+            p = ptr;
+            first = false;
+        });
+        *p = '\n';
+    };
+
+    writeLinesMmap(output_path + ".metis", n, std::string_view(header, hlen), lineBytes, writeLine, opts.num_threads);
+}
+
+// Write the CSR as two single-column Parquet files: {path}.indices.parquet (the
+// neighbor ids, native K width) and {path}.indptr.parquet (the offsets, uint64).
+// Tuned for on-disk size (delta encoding + zstd); see DESIGN.md for the encoding
+// rationale and the note on converting to Feather for zero-copy consumers.
 
 template <class K, class O>
 void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions & = {})
@@ -187,8 +133,7 @@ void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_pa
     auto props = pb.build();
     auto arrow_props = parquet::default_arrow_writer_properties();
 
-    // Large row groups keep per-group overhead negligible; Parquet still streams
-    // pages within a group, so this does not buffer the whole column.
+    // Large row groups; Parquet still streams pages within a group.
     constexpr int64_t kRowGroup = int64_t{1} << 24; // 16Mi rows
 
     // Wrap a contiguous vector as a single-column Parquet table and stream it out.
@@ -200,8 +145,7 @@ void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_pa
         PARQUET_THROW_NOT_OK(out->Close());
     };
 
-    // Zero-copy: build an Arrow array that references the vector's memory directly.
-    // The Buffer is non-owning, so the source vector must outlive the write (it does).
+    // Zero-copy: the Arrow array references the vector's memory (which outlives the write).
     auto wrapZeroCopy = [](const auto *vec_data, int64_t len, std::shared_ptr<arrow::DataType> type) {
         auto buf = arrow::Buffer::Wrap(vec_data, static_cast<size_t>(len));
         auto ad = arrow::ArrayData::Make(std::move(type), len, {nullptr, buf});
@@ -215,27 +159,39 @@ void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_pa
                 wrapZeroCopy(g.offsets.data(), static_cast<int64_t>(g.offsets.size()), arrow::uint64()));
 }
 
-// ─── writeGraphToCSV ─────────────────────────────────────────────────────────
-//
-// Writes a headerless CSV edge list: one "u{sep}v" line per undirected edge,
-// u < v, using compact 0-indexed IDs. opts.sep controls the delimiter.
+// Write a headerless CSV edge list, one "u{sep}v" line per undirected edge (u<v).
+// Parallelised over num_threads.
 
 template <class K, class O>
 void writeGraphToCSV(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
 {
-    std::string out = output_path + ".csv";
-    std::ofstream f(out);
-    if (!f)
-        throw std::runtime_error("Cannot create: " + out);
-    size_t n = g.span();
-    for (K u = 0; u < static_cast<K>(n); ++u)
-        g.forEachEdgeKey(u, [&](K v) {
-            if (v > u)
-                f << u << opts.sep << v << '\n';
+    const size_t n = g.span();
+    const char sep = opts.sep;
+
+    auto lineBytes = [&](size_t u) {
+        size_t bytes = 0;
+        g.forEachEdgeKey((K)u, [&](K v) {
+            if (v > (K)u)
+                bytes += numDigits((uint32_t)u) + 1 + numDigits((uint32_t)v) + 1;
         });
+        return bytes;
+    };
+    auto writeLine = [&](size_t u, char *p) {
+        g.forEachEdgeKey((K)u, [&](K v) {
+            if (v > (K)u)
+            {
+                p = std::to_chars(p, p + 11, (uint32_t)u).ptr;
+                *p++ = sep;
+                p = std::to_chars(p, p + 11, (uint32_t)v).ptr;
+                *p++ = '\n';
+            }
+        });
+    };
+
+    writeLinesMmap(output_path + ".csv", n, {}, lineBytes, writeLine, opts.num_threads);
 }
 
-// ─── writeGraph ──────────────────────────────────────────────────────────────
+// Dispatch a CSR to the writer for the requested output format.
 
 template <class K, class O>
 void writeGraph(const DiGraphCsr<K, O> &g, const std::string &output_path, EdgesFormat fmt,

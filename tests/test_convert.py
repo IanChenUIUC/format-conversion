@@ -145,3 +145,62 @@ def test_tsv_separator(tmp_path):
     out = tmp_path / "out"
     convert(g, None, out, EdgesFormat.METIS)
     assert FORMATS["metis"].read(out) == frozenset([(0, 1), (1, 2), (2, 3)])
+
+
+# ── Robustness: malformed input and option plumbing ──────────────────────────
+
+def test_malformed_input_raises_not_aborts(tmp_path):
+    """A non-numeric edge line must raise a catchable exception, not SIGABRT."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\nGARBAGE,2\n")
+    nodes = tmp_path / "nodes.csv"
+    nodes.write_text("node_id\n0\n1\n2\n")
+    opts = ParseOptions(); opts.skip_rows = 1
+    gd = GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, opts)
+    nd = NodeDescriptor(str(nodes))
+    with pytest.raises(Exception):
+        convert(gd, nd, tmp_path / "out", EdgesFormat.METIS)
+
+
+def test_bad_sep_raises(tmp_path):
+    """An unsupported separator is rejected up front with a catchable error."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n")
+    opts = ParseOptions(); opts.skip_rows = 1; opts.sep = "|"
+    gd = GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, opts)
+    with pytest.raises(Exception):
+        convert(gd, None, tmp_path / "out", EdgesFormat.METIS)
+
+
+def test_keep_self_loops_option(tmp_path):
+    """keep_self_loops is reachable from Python and changes the output."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,0\n0,1\n")          # one self-loop, one real edge
+    nodes = tmp_path / "nodes.csv"
+    nodes.write_text("node_id\n0\n1\n")
+    metis = FORMATS["metis"]
+
+    # default: self-loop dropped
+    o1 = ParseOptions(); o1.skip_rows = 1
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, o1),
+            NodeDescriptor(str(nodes)), tmp_path / "drop", EdgesFormat.METIS)
+    dropped = metis.read(tmp_path / "drop")
+
+    # keep_self_loops=True: self-loop retained somewhere in the CSR
+    o2 = ParseOptions(); o2.skip_rows = 1; o2.keep_self_loops = True
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, o2),
+            NodeDescriptor(str(nodes)), tmp_path / "keep", EdgesFormat.METIS)
+    # METIS reader drops u==v pairs, so compare total neighbor counts via indptr/CSR instead:
+    import pyarrow.parquet as pq
+    o3 = ParseOptions(); o3.skip_rows = 1; o3.keep_self_loops = True
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, o3),
+            NodeDescriptor(str(nodes)), tmp_path / "keep_pq", EdgesFormat.CSR_PARQUET)
+    kept_total = pq.read_table(str(tmp_path / "keep_pq") + ".indptr.parquet")["indptr"].to_pylist()[-1]
+
+    o4 = ParseOptions(); o4.skip_rows = 1
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, o4),
+            NodeDescriptor(str(nodes)), tmp_path / "drop_pq", EdgesFormat.CSR_PARQUET)
+    dropped_total = pq.read_table(str(tmp_path / "drop_pq") + ".indptr.parquet")["indptr"].to_pylist()[-1]
+
+    # self-loop adds 2 directed entries (u->u twice in symmetric CSR) vs dropped
+    assert kept_total > dropped_total

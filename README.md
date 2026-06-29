@@ -43,6 +43,22 @@ Here is an ongoing list of which readers and writers support parallelism:
 
 *Arrow parallelism is system dependant and is not explicitly controlled.
 
+Set `ParseOptions.num_threads` to the core count to parallelise the CSV→CSR build
+(and the neighbor sort, when `sort_neighbors` is enabled).
+
+### Performance on large runs
+
+Two settings are left to the runtime rather than baked into the code:
+
+- **Transparent huge pages.** The build advises its large arrays for 2 MB pages to
+  cut TLB misses on the random scatter. Ensure
+  `/sys/kernel/mm/transparent_hugepage/enabled` is `always` or `madvise`.
+- **NUMA.** On multi-socket nodes, launch under `numactl --interleave=all` so the
+  random traffic to the indices array draws bandwidth from all memory controllers.
+  Single-socket nodes need nothing. The code does no NUMA-aware placement by design.
+
+See `DESIGN.md` for the rationale behind these and the rest of the implementation.
+
 # Formats
 
 ## Edges
