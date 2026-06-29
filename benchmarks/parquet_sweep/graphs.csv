@@ -1,0 +1,2 @@
+name,path,format,nodes,skip_rows
+abm14,../../input/abm14_edgelist.csv,csv,../../input/abm14_nodelist.csv,1

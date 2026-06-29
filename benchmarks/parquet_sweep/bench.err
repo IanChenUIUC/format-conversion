@@ -1,0 +1,85 @@
+[build] abm14 (csv) ... n=13926219 m=581472875
+  csr dictionary none sorted=0 -> 5086618858 bytes
+  csr dictionary snappy sorted=0 -> 5085404819 bytes
+  csr dictionary zstd:3 sorted=0 -> 4374309223 bytes
+  csr dictionary zstd:19 sorted=0 -> 4234068035 bytes
+  csr dictionary gzip sorted=0 -> 4238715504 bytes
+  csr plain none sorted=0 -> 4654595128 bytes
+  csr plain snappy sorted=0 -> 4652247926 bytes
+  csr plain zstd:3 sorted=0 -> 3870618055 bytes
+  csr plain zstd:19 sorted=0 -> 3721358857 bytes
+  csr plain gzip sorted=0 -> 3742123778 bytes
+  csr delta none sorted=0 -> 3529343545 bytes
+  csr delta snappy sorted=0 -> 3529644353 bytes
+  csr delta zstd:3 sorted=0 -> 3529152116 bytes
+  csr delta zstd:19 sorted=0 -> 3515920081 bytes
+  csr delta gzip sorted=0 -> 3509197308 bytes
+  edgelist dictionary none sorted=0 -> 2762619978 bytes
+  edgelist dictionary snappy sorted=0 -> 2758420641 bytes
+  edgelist dictionary zstd:3 sorted=0 -> 2332091932 bytes
+  edgelist dictionary zstd:19 sorted=0 -> 2188908998 bytes
+  edgelist dictionary gzip sorted=0 -> 2203525690 bytes
+  edgelist plain none sorted=0 -> 4654577442 bytes
+  edgelist plain snappy sorted=0 -> 2505217725 bytes
+  edgelist plain zstd:3 sorted=0 -> 1955915767 bytes
+  edgelist plain zstd:19 sorted=0 -> 1835146489 bytes
+  edgelist plain gzip sorted=0 -> 1858823404 bytes
+  edgelist delta none sorted=0 -> 1786279462 bytes
+  edgelist delta snappy sorted=0 -> 1766620038 bytes
+  edgelist delta zstd:3 sorted=0 -> 1758176585 bytes
+  edgelist delta zstd:19 sorted=0 -> 1738281100 bytes
+  edgelist delta gzip sorted=0 -> 1740519136 bytes
+  csr dictionary none sorted=1 -> 5086606675 bytes
+  csr dictionary snappy sorted=1 -> 5084732477 bytes
+  csr dictionary zstd:3 sorted=1 -> 4354101899 bytes
+  csr dictionary zstd:19 sorted=1 -> 4155711424 bytes
+  csr dictionary gzip sorted=1 -> 4166095873 bytes
+  csr plain none sorted=1 -> 4654595128 bytes
+  csr plain snappy sorted=1 -> 4651224928 bytes
+  csr plain zstd:3 sorted=1 -> 3854484504 bytes
+  csr plain zstd:19 sorted=1 -> 3634351143 bytes
+  csr plain gzip sorted=1 -> 3664767321 bytes
+  csr delta none sorted=1 -> 2941521906 bytes
+  csr delta snappy sorted=1 -> 2941889148 bytes
+  csr delta zstd:3 sorted=1 -> 2936436964 bytes
+  csr delta zstd:19 sorted=1 -> 2898642070 bytes
+  csr delta gzip sorted=1 -> 2889517249 bytes
+  edgelist dictionary none sorted=1 -> 2762623224 bytes
+  edgelist dictionary snappy sorted=1 -> 2758423752 bytes
+  edgelist dictionary zstd:3 sorted=1 -> 2319754768 bytes
+  edgelist dictionary zstd:19 sorted=1 -> 2125022722 bytes
+  edgelist dictionary gzip sorted=1 -> 2138717717 bytes
+  edgelist plain none sorted=1 -> 4654577442 bytes
+  edgelist plain snappy sorted=1 -> 2505217631 bytes
+  edgelist plain zstd:3 sorted=1 -> 1949010547 bytes
+  edgelist plain zstd:19 sorted=1 -> 1768826255 bytes
+  edgelist plain gzip sorted=1 -> 1792108105 bytes
+  edgelist delta none sorted=1 -> 1256504459 bytes
+  edgelist delta snappy sorted=1 -> 1236880705 bytes
+  edgelist delta zstd:3 sorted=1 -> 1220998178 bytes
+  edgelist delta zstd:19 sorted=1 -> 1209924762 bytes
+  edgelist delta gzip sorted=1 -> 1210315774 bytes
+wrote results.csv
+	Command being timed: "./build/bench_parquet --manifest graphs.csv --sweep sweep.csv --results results.csv"
+	User time (seconds): 8828.89
+	System time (seconds): 222.80
+	Percent of CPU this job got: 117%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:08:08
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 43979884
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 11
+	Minor (reclaiming a frame) page faults: 82169321
+	Voluntary context switches: 4038
+	Involuntary context switches: 22529
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 976
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
