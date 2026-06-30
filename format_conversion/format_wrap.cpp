@@ -30,7 +30,8 @@ PYBIND11_MODULE(format, m)
         .def_readwrite("num_threads", &ParseOptions::num_threads)
         .def_readwrite("base_index", &ParseOptions::base_index)
         .def_readwrite("keep_self_loops", &ParseOptions::keep_self_loops)
-        .def_readwrite("sort_neighbors", &ParseOptions::sort_neighbors);
+        .def_readwrite("sort_neighbors", &ParseOptions::sort_neighbors)
+        .def_readwrite("use_u64_indices", &ParseOptions::use_u64_indices);
 
     // ── NodeDescriptor ───────────────────────────────────────────────────────
 

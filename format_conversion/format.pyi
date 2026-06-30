@@ -49,7 +49,10 @@ class NodeDescriptor:
         ...
 class ParseOptions:
     comment_char: str
+    keep_self_loops: bool
     sep: str
+    sort_neighbors: bool
+    use_u64_indices: bool
     def __init__(self) -> None:
         ...
     @property
@@ -57,18 +60,6 @@ class ParseOptions:
         ...
     @base_index.setter
     def base_index(self, arg0: typing.SupportsInt) -> None:
-        ...
-    @property
-    def id_column(self) -> int:
-        ...
-    @id_column.setter
-    def id_column(self, arg0: typing.SupportsInt) -> None:
-        ...
-    @property
-    def label_column(self) -> int:
-        ...
-    @label_column.setter
-    def label_column(self, arg0: typing.SupportsInt) -> None:
         ...
     @property
     def num_threads(self) -> int:

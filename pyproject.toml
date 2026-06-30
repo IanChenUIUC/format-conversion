@@ -21,3 +21,12 @@ dev = [
     "pytest>=9.1.1",
     "setuptools>=82.0.1",
 ]
+# Cross-library conversion benchmark (benchmarks/conversion). Install with:
+#   uv sync --group benchmarks
+# networkit pulls in numpy/scipy transitively. Versions below are the ones the
+# adapters were verified against.
+benchmarks = [
+    "networkit>=11.2",
+    "icebug-format>=1.0",
+    "duckdb>=1.0",
+]

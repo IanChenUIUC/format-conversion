@@ -1,0 +1,64 @@
+# Track 2 cross-library conversion benchmark configuration.
+#
+# gen_jobs.py reads this file and expands it into jobs.csv (one row per SLURM
+# array task). Each job is a single (comparison, tool, conversion, threads,
+# graph) point. run_job.py then runs two trials per job (warmup + measure).
+#
+# Paths are interpreted relative to this directory (benchmarks/conversion/).
+
+[run]
+# Thread levels to sweep. On a single-core container only [1] is meaningful;
+# a cluster run would use e.g. [1, 4, 16, 64].
+threads = [1]
+
+# Gate every tool's output against format-conversion's reference degree
+# sequence (relabeling-invariant). Set false to skip the correctness build
+# (halves work on very large graphs; only do this once a graph is trusted).
+check_degseq = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Comparisons. Each names the tools that participate and the conversions they
+# are asked to perform. format_conv is the reference and appears in every
+# comparison. The "shared format" rule (see README) is why each comparison only
+# pairs tools that read/write the same formats on both sides.
+
+[comparisons.networkit]
+# Both tools read/write the same comma-separated, headerless, compacted CSV
+# (prepared once from the source, untimed) and the same METIS file — no
+# separate "el" dialect is introduced. NetworKit's side uses EdgeListReader /
+# EdgeListWriter / METISGraphReader / METISGraphWriter directly (not
+# graphio.convertGraph()), configured with separator="," and firstNode=0 to
+# match format-conversion's own CSV_EDGELIST exactly.
+tools = ["format_conv", "networkit"]
+conversions = ["csv->metis", "metis->csv"]
+
+[comparisons.icebug]
+tools = ["format_conv", "icebug"]
+conversions = ["csv->csr"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool-specific flags.
+
+[tools.format_conv]
+# In the icebug comparison, icebug emits uint64 indices. Match it so the
+# out_bytes column is an apples-to-apples size comparison.
+use_u64_indices_for_csr = true
+
+[tools.networkit]
+# networkit's METIS reader/writer and edge-list format need no extra flags here.
+
+[tools.icebug]
+# icebug pipeline: CSV -> DuckDB tables -> icebug-format CLI -> Parquet.
+schema = "schema.cypher"
+add_reverse_edges = true   # make the output symmetric (matches our CSR)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Graphs. Each is a CSV edge list plus an optional node list (for id remapping).
+# format is the *native* (source) format of `path`.
+
+[[graphs]]
+name = "dnc"
+path = "../../input/dnc_edges.csv"
+format = "csv"
+nodes = "../../input/dnc_nodes.csv"
+skip_rows = 1

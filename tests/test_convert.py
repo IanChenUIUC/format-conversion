@@ -204,3 +204,37 @@ def test_keep_self_loops_option(tmp_path):
 
     # self-loop adds 2 directed entries (u->u twice in symmetric CSR) vs dropped
     assert kept_total > dropped_total
+
+
+def test_use_u64_indices_option(tmp_path):
+    """use_u64_indices emits a uint64 indices column with values identical to the
+    default uint32 path (only the dtype changes; indptr is unaffected)."""
+    import pyarrow.parquet as pq
+
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n1,2\n2,0\n")
+    nodes = tmp_path / "nodes.csv"
+    nodes.write_text("node_id\n0\n1\n2\n")
+
+    # default: uint32 indices
+    o32 = ParseOptions(); o32.skip_rows = 1
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, o32),
+            NodeDescriptor(str(nodes)), tmp_path / "u32", EdgesFormat.CSR_PARQUET)
+    t32 = pq.read_table(str(tmp_path / "u32") + ".indices.parquet")
+    p32 = pq.read_table(str(tmp_path / "u32") + ".indptr.parquet")
+
+    # use_u64_indices=True: uint64 indices, same values
+    o64 = ParseOptions(); o64.skip_rows = 1; o64.use_u64_indices = True
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, o64),
+            NodeDescriptor(str(nodes)), tmp_path / "u64", EdgesFormat.CSR_PARQUET)
+    t64 = pq.read_table(str(tmp_path / "u64") + ".indices.parquet")
+    p64 = pq.read_table(str(tmp_path / "u64") + ".indptr.parquet")
+
+    import pyarrow as pa
+    assert t32.schema.field("indices").type == pa.uint32()
+    assert t64.schema.field("indices").type == pa.uint64()
+    # values identical despite differing dtype
+    assert t64["indices"].to_pylist() == t32["indices"].to_pylist()
+    # indptr unchanged (still uint64 in both cases)
+    assert p64.schema.field("indptr").type == pa.uint64()
+    assert p64["indptr"].to_pylist() == p32["indptr"].to_pylist()

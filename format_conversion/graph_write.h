@@ -121,7 +121,7 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
 // rationale and the note on converting to Feather for zero-copy consumers.
 
 template <class K, class O>
-void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions & = {})
+void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
 {
     static_assert(sizeof(O) == 8, "offsets (O) must be uint64_t");
     static_assert(sizeof(K) == 4 || sizeof(K) == 8, "indices (K) must be 32- or 64-bit unsigned");
@@ -152,9 +152,24 @@ void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_pa
         return arrow::MakeArray(ad);
     };
 
-    auto idx_type = sizeof(K) == 4 ? arrow::uint32() : arrow::uint64();
-    writeColumn(output_path + ".indices.parquet", "indices",
-                wrapZeroCopy(g.edgeKeys.data(), static_cast<int64_t>(g.edgeKeys.size()), idx_type));
+    // Indices column. Default: emit K-width (uint32 when K=uint32) zero-copy.
+    // When use_u64_indices is requested and K is narrower than 64-bit, widen into
+    // an owning uint64 buffer (outlives the synchronous writeColumn call) so the
+    // dtype matches 64-bit tools such as icebug.
+    if (opts.use_u64_indices && sizeof(K) < 8)
+    {
+        std::vector<uint64_t> wide(g.edgeKeys.size());
+        for (size_t i = 0; i < g.edgeKeys.size(); ++i)
+            wide[i] = static_cast<uint64_t>(g.edgeKeys[i]);
+        writeColumn(output_path + ".indices.parquet", "indices",
+                    wrapZeroCopy(wide.data(), static_cast<int64_t>(wide.size()), arrow::uint64()));
+    }
+    else
+    {
+        auto idx_type = sizeof(K) == 4 ? arrow::uint32() : arrow::uint64();
+        writeColumn(output_path + ".indices.parquet", "indices",
+                    wrapZeroCopy(g.edgeKeys.data(), static_cast<int64_t>(g.edgeKeys.size()), idx_type));
+    }
     writeColumn(output_path + ".indptr.parquet", "indptr",
                 wrapZeroCopy(g.offsets.data(), static_cast<int64_t>(g.offsets.size()), arrow::uint64()));
 }
