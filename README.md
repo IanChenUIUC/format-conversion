@@ -63,6 +63,28 @@ fmt.convert(graph, nodes, output_path=out, output_fmt=fmt.EdgesFormat.CSR_PARQUE
 width); setting it on options used for reading is an error. `sort_neighbors` is a
 read-side transform and is always taken from the input options.
 
+### Writing multiple formats from one read
+
+`convert` is overloaded: instead of a single `(output_path, output_fmt)` it also
+accepts a **list of output targets**, so the input is parsed and built only once
+and then written to each format:
+
+```python
+u64 = fmt.ParseOptions(); u64.use_u64_indices = True
+fmt.convert(graph, nodes, [
+    ("out/dnc",   fmt.EdgesFormat.CSR_PARQUET, u64),   # (path, fmt, opts)
+    ("out/dnc32", fmt.EdgesFormat.CSR_PARQUET),        # (path, fmt) — inherit input opts
+    ("out/dnc",   fmt.EdgesFormat.METIS),
+    ("out/dnc",   fmt.EdgesFormat.CSV_EDGELIST),
+])
+```
+
+Each target is `(path, fmt)` or `(path, fmt, opts)`; a 2-tuple (or `opts=None`)
+inherits the input options, exactly like the single-output form. Any
+directed→METIS target is rejected up front, before any file is written, so that
+misconfiguration is all-or-nothing; the outputs are otherwise written in list
+order.
+
 ### Parallelism
 
 While most of this is I/O bound, parallelism may help, depending on the architecture.

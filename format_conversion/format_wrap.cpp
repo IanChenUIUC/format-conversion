@@ -59,11 +59,34 @@ PYBIND11_MODULE(format, m)
            std::shared_ptr<NodeDescriptor> nodes, // None → dense mode
            std::filesystem::path output_path, EdgesFormat output_fmt,
            std::optional<ParseOptions> output_opts) { // None → reuse input options
-            convert_graph(*input, nodes.get(), output_path.string(), output_fmt,
-                          output_opts ? &*output_opts : nullptr);
+            convert_graph(*input, nodes.get(), output_path.string(), output_fmt, output_opts ? &*output_opts : nullptr);
         },
         py::arg("input"), py::arg("nodes") = py::none(), py::arg("output_path"), py::arg("output_fmt"),
         py::arg("output_opts") = py::none(), py::call_guard<py::gil_scoped_release>());
+
+    m.def(
+        "convert",
+        [](std::shared_ptr<GraphDescriptor> input, std::shared_ptr<NodeDescriptor> nodes,
+           const std::vector<py::tuple> &outputs) {
+            std::vector<OutputSpec> specs;
+            specs.reserve(outputs.size());
+            for (const auto &t : outputs)
+            {
+                if (t.size() != 2 && t.size() != 3)
+                    throw std::runtime_error("each output must be (path, fmt) or (path, fmt, opts)");
+                std::string path = py::cast<std::filesystem::path>(t[0]).string();
+                EdgesFormat fmt = py::cast<EdgesFormat>(t[1]);
+                std::optional<ParseOptions> oo;
+                if (t.size() == 3 && !t[2].is_none())
+                    oo = py::cast<ParseOptions>(t[2]);
+                specs.emplace_back(std::move(path), fmt, std::move(oo));
+            }
+            {
+                py::gil_scoped_release rel;
+                convert_graph(*input, nodes.get(), specs);
+            }
+        },
+        py::arg("input"), py::arg("nodes") = py::none(), py::arg("outputs"));
 
     // ── partition ────────────────────────────────────────────────────────────
 

@@ -356,3 +356,74 @@ def test_use_u64_indices_on_read_errors(tmp_path):
     with pytest.raises(Exception):
         convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, bad),
                 None, tmp_path / "x", EdgesFormat.CSR_PARQUET)
+
+
+# ── multi-output convert (read once, write many) ───────────────────────────────
+
+def test_convert_multi_matches_single(tmp_path):
+    """Writing several formats in one read-once call yields byte-identical output
+    to separate single-output convert calls."""
+    edges = tmp_path / "edges.csv"; edges.write_text("src,dst\n0,1\n1,2\n2,0\n")
+    nodes = tmp_path / "nodes.csv"; nodes.write_text("node_id\n0\n1\n2\n")
+    ri = ParseOptions(); ri.skip_rows = 1
+
+    def gd(): return GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri)
+    def nd(): return NodeDescriptor(str(nodes))
+
+    convert(gd(), nd(), [
+        (str(tmp_path / "m"), EdgesFormat.CSR_PARQUET),
+        (str(tmp_path / "m"), EdgesFormat.METIS),
+        (str(tmp_path / "m"), EdgesFormat.CSV_EDGELIST),
+    ])
+    # references
+    convert(gd(), nd(), str(tmp_path / "s"), EdgesFormat.CSR_PARQUET)
+    convert(gd(), nd(), str(tmp_path / "s"), EdgesFormat.METIS)
+    convert(gd(), nd(), str(tmp_path / "s"), EdgesFormat.CSV_EDGELIST)
+
+    for suffix in (".indices.parquet", ".indptr.parquet", ".metis", ".csv"):
+        assert (tmp_path / f"m{suffix}").read_bytes() == (tmp_path / f"s{suffix}").read_bytes()
+
+
+def test_convert_multi_shorthand_and_per_output_opts(tmp_path):
+    """2-tuple shorthand inherits input opts; 3-tuple opts apply per output
+    (uint64 vs uint32 CSR, and a tab-separated CSV, from one read)."""
+    import pyarrow as pa, pyarrow.parquet as pq
+    edges = tmp_path / "edges.csv"; edges.write_text("src,dst\n0,1\n1,2\n2,0\n")
+    nodes = tmp_path / "nodes.csv"; nodes.write_text("node_id\n0\n1\n2\n")
+    ri = ParseOptions(); ri.skip_rows = 1
+    u64 = ParseOptions(); u64.use_u64_indices = True
+    tab = ParseOptions(); tab.sep = "\t"
+
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri), NodeDescriptor(str(nodes)), [
+        (str(tmp_path / "u64"), EdgesFormat.CSR_PARQUET, u64),
+        (str(tmp_path / "u32"), EdgesFormat.CSR_PARQUET),          # 2-tuple shorthand
+        (str(tmp_path / "tab"), EdgesFormat.CSV_EDGELIST, tab),
+    ])
+    assert pq.read_table(str(tmp_path / "u64.indices.parquet")).schema.field("indices").type == pa.uint64()
+    assert pq.read_table(str(tmp_path / "u32.indices.parquet")).schema.field("indices").type == pa.uint32()
+    first = (tmp_path / "tab.csv").read_text().splitlines()[0]
+    assert "\t" in first and "," not in first
+
+
+def test_convert_multi_directed_metis_is_all_or_nothing(tmp_path):
+    """A directed→METIS output anywhere in the list makes the whole call raise
+    before any file is written (pre-validation), even outputs listed earlier."""
+    edges = tmp_path / "edges.csv"; edges.write_text("src,dst\n0,1\n2,3\n")
+    rd = ParseOptions(); rd.skip_rows = 1; rd.directed = True
+    wd = ParseOptions(); wd.directed = True
+
+    with pytest.raises(Exception):
+        convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, rd), None, [
+            (str(tmp_path / "ok"), EdgesFormat.CSV_EDGELIST, wd),   # valid, listed first
+            (str(tmp_path / "bad"), EdgesFormat.METIS, wd),         # invalid
+        ])
+    # the earlier valid output must not have been written
+    assert not (tmp_path / "ok.csv").exists()
+
+
+def test_convert_multi_empty_is_noop(tmp_path):
+    """An empty output list writes nothing and does not raise."""
+    edges = tmp_path / "edges.csv"; edges.write_text("src,dst\n0,1\n")
+    ri = ParseOptions(); ri.skip_rows = 1
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri), None, [])
+    assert list(tmp_path.glob("*.csv")) == [edges]

@@ -32,14 +32,14 @@ def main() -> None:
 
     # ── Output ───────────────────────────────────────────
     output_fmt = fmt.EdgesFormat.CSR_PARQUET  ## CHANGEME
-    output_opts = fmt.ParseOptions()  # optional
+    output_opts = None  # optional; defaults to edge_opts
 
     if output_fmt == fmt.EdgesFormat.CSV_EDGELIST:
         output_path = OUTPUT / "dnc_edges"
     if output_fmt == fmt.EdgesFormat.CSR_PARQUET:
         output_path = OUTPUT / "dnc"
+        output_opts = fmt.ParseOptions()
         output_opts.use_u64_indices = True
-        output_fmt.directed = False
     if output_fmt == fmt.EdgesFormat.METIS:
         output_path = OUTPUT / "dnc"
 
@@ -47,6 +47,7 @@ def main() -> None:
     graph = fmt.GraphDescriptor(edges_file, input_fmt, edge_opts)
     nodes = fmt.NodeDescriptor(nodes_file, node_opts)
 
+    Path(output_path).parent.mkdir(exist_ok=True, parents=True)
     fmt.convert(graph, nodes, output_path, output_fmt, output_opts)
 
 
