@@ -53,6 +53,7 @@ class ParseOptions:
     sep: str
     sort_neighbors: bool
     use_u64_indices: bool
+    directed: bool
     def __init__(self) -> None:
         ...
     @property
@@ -73,7 +74,7 @@ class ParseOptions:
     @skip_rows.setter
     def skip_rows(self, arg0: typing.SupportsInt) -> None:
         ...
-def convert(input: GraphDescriptor, nodes: NodeDescriptor = None, output_path: os.PathLike | str | bytes, output_fmt: EdgesFormat) -> None:
+def convert(input: GraphDescriptor, nodes: NodeDescriptor = None, output_path: os.PathLike | str | bytes, output_fmt: EdgesFormat, output_opts: ParseOptions | None = None) -> None:
     ...
 def partition(input: GraphDescriptor, nodes: NodeDescriptor = None, labels_path: os.PathLike | str | bytes, output_dir: os.PathLike | str | bytes, output_fmt: EdgesFormat, label_opts: ParseOptions = ..., batch_size: typing.SupportsInt = 18446744073709551615) -> None:
     ...

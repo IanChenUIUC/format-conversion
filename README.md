@@ -30,6 +30,39 @@ Robinhood provides a faster alternative to `unordered_map`.
 The main patterns are described in the `examples/` folder, with format conversion as well as extracting subgraphs according to a partition.
 Any input formats can be read or written to through the python or cpp API.
 
+### Directed graphs
+
+By default graphs are treated as **undirected**: each parsed edge is symmetrized
+(both `u→v` and `v→u` are stored) and the edgelist writer emits each edge once as
+`u,v` with `u<v`. Set `ParseOptions.directed = True` to treat edges as
+**directed** instead: reading stores only the arc `u→v` (no symmetrization) and
+the edgelist writer emits every stored arc.
+
+`directed` is meaningful for `CSV_EDGELIST` and `CSR_PARQUET`. METIS is an
+undirected adjacency format, so requesting directed **METIS output** raises an
+error. Note that `CSR_PARQUET` and METIS files carry no direction bit on disk;
+`directed` describes how a given `convert` call interprets and emits edges, so set
+it consistently across a round trip.
+
+### Separate read and write options
+
+`convert` reads its input using the options on the input `GraphDescriptor`, and
+writes using an optional fifth argument, `output_opts`. When `output_opts` is
+omitted (or `None`) the input options are reused, so the read and write sides can
+differ when needed — for example reading comma-separated and writing
+tab-separated, or requesting 64-bit CSR indices only on output:
+
+```python
+read_opts = fmt.ParseOptions(); read_opts.skip_rows = 1        # header on input
+write_opts = fmt.ParseOptions(); write_opts.use_u64_indices = True  # output-only
+fmt.convert(graph, nodes, output_path=out, output_fmt=fmt.EdgesFormat.CSR_PARQUET,
+            output_opts=write_opts)
+```
+
+`use_u64_indices` is an **output-only** option (it sets the CSR indices column
+width); setting it on options used for reading is an error. `sort_neighbors` is a
+read-side transform and is always taken from the input options.
+
 ### Parallelism
 
 While most of this is I/O bound, parallelism may help, depending on the architecture.

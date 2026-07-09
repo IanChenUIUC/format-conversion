@@ -40,16 +40,27 @@ _DST_FMT = {
 
 
 def _opts(spec: dict) -> ParseOptions:
+    """Read/input options."""
     o = ParseOptions()
     o.num_threads = int(spec["threads"])
     o.sep = spec.get("sep", ",")
     if spec["src_format"] == "csv":
         o.skip_rows = int(spec.get("skip_rows", 0))
+    return o
+
+
+def _output_opts(spec: dict) -> "ParseOptions | None":
+    """Write/output options, or None to reuse the input opts. use_u64_indices is
+    output-only (setting it on read opts is an error), so it lives here."""
     if spec["dst_format"] == "csr" and spec.get("flags", {}).get(
         "use_u64_indices_for_csr", False
     ):
-        o.use_u64_indices = True
-    return o
+        oo = ParseOptions()
+        oo.num_threads = int(spec["threads"])
+        oo.sep = spec.get("sep", ",")
+        oo.use_u64_indices = True
+        return oo
+    return None
 
 
 def _out_paths(out_prefix: str, dst_format: str) -> list[str]:
@@ -69,7 +80,7 @@ def convert(spec: dict) -> dict:
     nd = None
     if spec["src_format"] == "csv" and spec.get("nodes_path"):
         nd = NodeDescriptor(str(spec["nodes_path"]), o)
-    _convert(gd, nd, spec["out_prefix"], _DST_FMT[spec["dst_format"]])
+    _convert(gd, nd, spec["out_prefix"], _DST_FMT[spec["dst_format"]], _output_opts(spec))
     return {"out_paths": _out_paths(spec["out_prefix"], spec["dst_format"]),
             "out_format": spec["dst_format"]}
 

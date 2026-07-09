@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -31,7 +32,8 @@ PYBIND11_MODULE(format, m)
         .def_readwrite("base_index", &ParseOptions::base_index)
         .def_readwrite("keep_self_loops", &ParseOptions::keep_self_loops)
         .def_readwrite("sort_neighbors", &ParseOptions::sort_neighbors)
-        .def_readwrite("use_u64_indices", &ParseOptions::use_u64_indices);
+        .def_readwrite("use_u64_indices", &ParseOptions::use_u64_indices)
+        .def_readwrite("directed", &ParseOptions::directed);
 
     // ── NodeDescriptor ───────────────────────────────────────────────────────
 
@@ -55,10 +57,13 @@ PYBIND11_MODULE(format, m)
         "convert",
         [](std::shared_ptr<GraphDescriptor> input,
            std::shared_ptr<NodeDescriptor> nodes, // None → dense mode
-           std::filesystem::path output_path,
-           EdgesFormat output_fmt) { convert_graph(*input, nodes.get(), output_path.string(), output_fmt); },
+           std::filesystem::path output_path, EdgesFormat output_fmt,
+           std::optional<ParseOptions> output_opts) { // None → reuse input options
+            convert_graph(*input, nodes.get(), output_path.string(), output_fmt,
+                          output_opts ? &*output_opts : nullptr);
+        },
         py::arg("input"), py::arg("nodes") = py::none(), py::arg("output_path"), py::arg("output_fmt"),
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("output_opts") = py::none(), py::call_guard<py::gil_scoped_release>());
 
     // ── partition ────────────────────────────────────────────────────────────
 

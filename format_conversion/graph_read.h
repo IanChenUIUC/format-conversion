@@ -325,13 +325,21 @@ DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const Pa
     std::memset(td, 0, TN * sizeof(O));
 
     // Pass 1: each thread counts degrees into its own row (no shared writes).
-    parallelStripes(T, [&](int t) {
-        O *deg = td + static_cast<size_t>(t) * N;
-        forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, [&](K u, K v) {
-            ++deg[u];
-            ++deg[v];
+    // Undirected symmetrizes (counts both endpoints); directed counts only the
+    // out-endpoint. The branch is hoisted out of the per-edge path.
+    if (opts.directed)
+        parallelStripes(T, [&](int t) {
+            O *deg = td + static_cast<size_t>(t) * N;
+            forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, [&](K u, K) { ++deg[u]; });
         });
-    });
+    else
+        parallelStripes(T, [&](int t) {
+            O *deg = td + static_cast<size_t>(t) * N;
+            forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, [&](K u, K v) {
+                ++deg[u];
+                ++deg[v];
+            });
+        });
 
     // Offsets = prefix sum of total per-vertex degree.
     DiGraphCsr<K, O> g;
@@ -360,16 +368,23 @@ DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const Pa
     }
 
     // Pass 2: scatter into the disjoint slices (no shared writes, every slot
-    // written exactly once).
+    // written exactly once). Undirected writes both arcs; directed only u->v.
     g.edgeKeys.resize(static_cast<size_t>(total));
     adviseHugePages(g.edgeKeys.data(), g.edgeKeys.size() * sizeof(K));
-    parallelStripes(T, [&](int t) {
-        O *cur = td + static_cast<size_t>(t) * N;
-        forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, [&](K u, K v) {
-            g.edgeKeys[cur[u]++] = v;
-            g.edgeKeys[cur[v]++] = u;
+    if (opts.directed)
+        parallelStripes(T, [&](int t) {
+            O *cur = td + static_cast<size_t>(t) * N;
+            forEachValidEdgeStripe(data, t, T, nblocks, nm, opts,
+                                   [&](K u, K v) { g.edgeKeys[cur[u]++] = v; });
         });
-    });
+    else
+        parallelStripes(T, [&](int t) {
+            O *cur = td + static_cast<size_t>(t) * N;
+            forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, [&](K u, K v) {
+                g.edgeKeys[cur[u]++] = v;
+                g.edgeKeys[cur[v]++] = u;
+            });
+        });
 
     return g;
 }
@@ -487,6 +502,13 @@ template <class K, class O> void sortNeighbors(DiGraphCsr<K, O> &g, int num_thre
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd, NodeMap<K> &nm)
 {
+    // use_u64_indices is an output-only option (it controls the CSR_PARQUET
+    // indices column width). Setting it on read/input options is a mistake; it
+    // belongs on convert()'s output_opts.
+    if (gd.opts.use_u64_indices)
+        throw std::runtime_error("use_u64_indices is an output-only option; set it on the output_opts "
+                                 "of convert(), not on read/input options");
+
     switch (gd.fmt)
     {
     case CSV_EDGELIST: {

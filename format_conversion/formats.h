@@ -26,10 +26,22 @@ enum EdgesFormat
 //   num_threads       : worker threads for the CSV→CSR build (and the sort, when
 //                       sort_neighbors is set). 1 = serial.
 //   base_index        : value subtracted from every raw id (e.g. 1 for 1-indexed).
-//   sort_neighbors    : sort each vertex's adjacency list in the output.
-//   use_u64_indices   : emit the CSR_PARQUET indices column as uint64 instead of
-//                       uint32 (indptr is already 64-bit). Needed to match tools
-//                       that store 64-bit node ids (e.g. the icebug benchmark).
+//   sort_neighbors    : sort each vertex's adjacency list in the output (read-side).
+//   use_u64_indices   : (OUTPUT ONLY) emit the CSR_PARQUET indices column as uint64
+//                       instead of uint32 (indptr is already 64-bit). Needed to
+//                       match tools that store 64-bit node ids (e.g. the icebug
+//                       benchmark). Setting this on options used for *reading* is
+//                       an error — it belongs on the output_opts of convert().
+//   directed          : treat edges as directed rather than undirected. On the
+//                       READ side: false (default) symmetrizes each parsed edge
+//                       (adds u->v and v->u); true adds only the arc u->v. On the
+//                       WRITE side: false de-duplicates undirected edges (emits
+//                       each once as u,v with u<v); true emits every stored arc.
+//                       METIS output requires undirected (directed=true errors).
+//
+// A single ParseOptions type serves both reading and writing; convert() takes a
+// separate output_opts so the two roles can differ (e.g. read comma, write tab;
+// or request uint64 indices only on output). See convert().
 struct ParseOptions
 {
     char sep = ',';
@@ -40,6 +52,7 @@ struct ParseOptions
     uint64_t base_index = 0;
     bool sort_neighbors = false;
     bool use_u64_indices = false;
+    bool directed = false;
 };
 
 // An input node list (provides id remapping and any extra node columns).

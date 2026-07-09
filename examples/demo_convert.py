@@ -21,6 +21,7 @@ def main() -> None:
     nodes_file = INPUT / "dnc_nodes.csv"
 
     edge_opts = fmt.ParseOptions()
+    edge_opts.sort_neighbors = True
     if input_fmt == fmt.EdgesFormat.CSV_EDGELIST:
         edge_opts.skip_rows = 1  # header
         edges_file = INPUT / "dnc_edges.csv"
@@ -31,18 +32,22 @@ def main() -> None:
 
     # ── Output ───────────────────────────────────────────
     output_fmt = fmt.EdgesFormat.CSR_PARQUET  ## CHANGEME
+    output_opts = fmt.ParseOptions()  # optional
 
     if output_fmt == fmt.EdgesFormat.CSV_EDGELIST:
         output_path = OUTPUT / "dnc_edges"
     if output_fmt == fmt.EdgesFormat.CSR_PARQUET:
         output_path = OUTPUT / "dnc"
+        output_opts.use_u64_indices = True
+        output_fmt.directed = False
     if output_fmt == fmt.EdgesFormat.METIS:
         output_path = OUTPUT / "dnc"
 
     # ── Convert ───────────────────────────────────────────
     graph = fmt.GraphDescriptor(edges_file, input_fmt, edge_opts)
     nodes = fmt.NodeDescriptor(nodes_file, node_opts)
-    fmt.convert(graph, nodes, output_path=output_path, output_fmt=output_fmt)
+
+    fmt.convert(graph, nodes, output_path, output_fmt, output_opts)
 
 
 if __name__ == "__main__":

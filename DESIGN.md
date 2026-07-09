@@ -15,8 +15,9 @@ kept to interface/usage level; the reasoning lives here.
 | `format_wrap.cpp` | pybind11 bindings. |
 
 The in-memory representation throughout is puzzlef's `DiGraphCsr<K=uint32_t,
-O=uint64_t>` — symmetric CSR (both directions stored), `offsets` (`O`) and
-`edgeKeys` (`K`).
+O=uint64_t>` — CSR with `offsets` (`O`) and `edgeKeys` (`K`). By default the
+build stores a symmetric CSR (both directions of each edge); with
+`ParseOptions::directed` it stores only the out-arcs `u→v`.
 
 ## CSV → CSR build (`buildCSRFromCSV`)
 

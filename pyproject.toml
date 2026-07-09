@@ -17,6 +17,7 @@ build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
+    "pybind11>=3.0.4",
     "pybind11-stubgen>=2.5.5",
     "pytest>=9.1.1",
     "setuptools>=82.0.1",

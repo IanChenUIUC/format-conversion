@@ -85,6 +85,13 @@ void writeLinesMmap(const std::string &path, size_t n, std::string_view header, 
 template <class K, class O>
 void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
 {
+    // METIS is an undirected adjacency format; its header edge count assumes a
+    // symmetric graph (m = total arcs / 2). A directed graph has no faithful
+    // METIS representation, so reject it rather than emit a wrong count.
+    if (opts.directed)
+        throw std::runtime_error("METIS output is undirected-only; directed=true is not supported for METIS "
+                                 "(use CSV_EDGELIST or CSR_PARQUET for directed graphs)");
+
     const size_t n = g.span(), m = g.size() / 2;
     char header[64];
     int hlen = snprintf(header, sizeof(header), "%zu %zu\n", n, m);
@@ -174,7 +181,9 @@ void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_pa
                 wrapZeroCopy(g.offsets.data(), static_cast<int64_t>(g.offsets.size()), arrow::uint64()));
 }
 
-// Write a headerless CSV edge list, one "u{sep}v" line per undirected edge (u<v).
+// Write a headerless CSV edge list. Undirected (default): one "u{sep}v" line per
+// edge, emitted once with u<v (the CSR is symmetric, so the v<u copy is skipped).
+// Directed (opts.directed): one line per stored arc u->v, every arc emitted.
 // Parallelised over num_threads.
 
 template <class K, class O>
@@ -182,18 +191,19 @@ void writeGraphToCSV(const DiGraphCsr<K, O> &g, const std::string &output_path, 
 {
     const size_t n = g.span();
     const char sep = opts.sep;
+    const bool directed = opts.directed;
 
     auto lineBytes = [&](size_t u) {
         size_t bytes = 0;
         g.forEachEdgeKey((K)u, [&](K v) {
-            if (v > (K)u)
+            if (directed || v > (K)u)
                 bytes += numDigits((uint32_t)u) + 1 + numDigits((uint32_t)v) + 1;
         });
         return bytes;
     };
     auto writeLine = [&](size_t u, char *p) {
         g.forEachEdgeKey((K)u, [&](K v) {
-            if (v > (K)u)
+            if (directed || v > (K)u)
             {
                 p = std::to_chars(p, p + 11, (uint32_t)u).ptr;
                 *p++ = sep;

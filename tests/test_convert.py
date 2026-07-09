@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 from .formats import FORMATS, Format
-from .helpers import write_edgelist
+from .helpers import write_edgelist, read_edgelist_arcs, read_csr_arcs
 
 try:
     from format_conversion.format import (
@@ -223,10 +223,11 @@ def test_use_u64_indices_option(tmp_path):
     t32 = pq.read_table(str(tmp_path / "u32") + ".indices.parquet")
     p32 = pq.read_table(str(tmp_path / "u32") + ".indptr.parquet")
 
-    # use_u64_indices=True: uint64 indices, same values
-    o64 = ParseOptions(); o64.skip_rows = 1; o64.use_u64_indices = True
-    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, o64),
-            NodeDescriptor(str(nodes)), tmp_path / "u64", EdgesFormat.CSR_PARQUET)
+    # use_u64_indices=True on OUTPUT opts: uint64 indices, same values
+    o_in = ParseOptions(); o_in.skip_rows = 1
+    o_out = ParseOptions(); o_out.use_u64_indices = True
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, o_in),
+            NodeDescriptor(str(nodes)), tmp_path / "u64", EdgesFormat.CSR_PARQUET, o_out)
     t64 = pq.read_table(str(tmp_path / "u64") + ".indices.parquet")
     p64 = pq.read_table(str(tmp_path / "u64") + ".indptr.parquet")
 
@@ -238,3 +239,120 @@ def test_use_u64_indices_option(tmp_path):
     # indptr unchanged (still uint64 in both cases)
     assert p64.schema.field("indptr").type == pa.uint64()
     assert p64["indptr"].to_pylist() == p32["indptr"].to_pylist()
+
+
+# ── directed graphs ────────────────────────────────────────────────────────────
+
+def test_directed_csv_preserves_arcs(tmp_path):
+    """directed=true keeps each arc as-is: no symmetrizing, no de-dup, direction
+    preserved. Undirected (default) symmetrizes each edge instead."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n1,0\n2,3\n")  # 0<->1 (two arcs), 2->3
+
+    ri = ParseOptions(); ri.skip_rows = 1; ri.directed = True
+    wo = ParseOptions(); wo.directed = True
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri),
+            None, tmp_path / "dir", EdgesFormat.CSV_EDGELIST, wo)
+    assert read_edgelist_arcs(tmp_path / "dir.csv") == [(0, 1), (1, 0), (2, 3)]
+
+    # Undirected default: each edge symmetrized; 0,1 and 1,0 are the same
+    # undirected edge, emitted once with u<v per input occurrence (2 copies).
+    ru = ParseOptions(); ru.skip_rows = 1
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ru),
+            None, tmp_path / "und", EdgesFormat.CSV_EDGELIST)
+    assert read_edgelist_arcs(tmp_path / "und.csv") == [(0, 1), (0, 1), (2, 3)]
+
+
+def test_directed_csr_out_degrees(tmp_path):
+    """A directed CSR stores only out-arcs: indptr gives out-degrees, indices the
+    targets. Contrast with the undirected build which doubles the arc count."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n0,2\n2,0\n")
+
+    ri = ParseOptions(); ri.skip_rows = 1; ri.directed = True
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri),
+            None, tmp_path / "dir", EdgesFormat.CSR_PARQUET)
+    assert read_csr_arcs(tmp_path / "dir") == [(0, 1), (0, 2), (2, 0)]  # 3 arcs
+
+    ru = ParseOptions(); ru.skip_rows = 1
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ru),
+            None, tmp_path / "und", EdgesFormat.CSR_PARQUET)
+    assert len(read_csr_arcs(tmp_path / "und")) == 6  # symmetrized: 2x arcs
+
+
+def test_directed_self_loop_kept_once(tmp_path):
+    """With keep_self_loops, a directed self-loop u->u contributes exactly one
+    arc (the undirected build would add two)."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n1,1\n")
+
+    ri = ParseOptions(); ri.skip_rows = 1; ri.directed = True; ri.keep_self_loops = True
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri),
+            None, tmp_path / "dir", EdgesFormat.CSR_PARQUET)
+    assert read_csr_arcs(tmp_path / "dir") == [(1, 1)]
+
+
+def test_directed_metis_output_errors(tmp_path):
+    """METIS is undirected-only; requesting directed METIS output raises."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n2,3\n")
+    ri = ParseOptions(); ri.skip_rows = 1; ri.directed = True
+    wo = ParseOptions(); wo.directed = True
+    with pytest.raises(Exception):
+        convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri),
+                None, tmp_path / "m", EdgesFormat.METIS, wo)
+
+
+def test_directed_csr_roundtrip(tmp_path):
+    """A directed CSR round-trips: write directed CSR, read it back, write directed
+    CSV; the arcs survive unchanged."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n1,0\n1,2\n2,1\n0,2\n")
+
+    ri = ParseOptions(); ri.skip_rows = 1; ri.directed = True
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri),
+            None, tmp_path / "csr", EdgesFormat.CSR_PARQUET)
+    expected = read_csr_arcs(tmp_path / "csr")
+
+    # CSR_PARQUET carries no direction bit; the caller sets directed on both sides.
+    wo = ParseOptions(); wo.directed = True
+    convert(GraphDescriptor(str(tmp_path / "csr") + ".indices.parquet",
+                            EdgesFormat.CSR_PARQUET, ParseOptions()),
+            None, tmp_path / "back", EdgesFormat.CSV_EDGELIST, wo)
+    assert read_edgelist_arcs(tmp_path / "back.csv") == expected
+
+
+# ── separate input / output options ────────────────────────────────────────────
+
+def test_output_opts_separate_separator(tmp_path):
+    """Read comma, write tab in a single convert via output_opts."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n1,2\n")
+
+    ri = ParseOptions(); ri.skip_rows = 1; ri.sep = ","
+    wo = ParseOptions(); wo.sep = "\t"
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri),
+            None, tmp_path / "out", EdgesFormat.CSV_EDGELIST, wo)
+    first = (tmp_path / "out.csv").read_text().splitlines()[0]
+    assert "\t" in first and "," not in first
+
+
+def test_output_opts_defaults_to_input(tmp_path):
+    """Omitting output_opts reuses the input opts for writing (here: the ','
+    separator carries through to the output)."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n1,2\n")
+    ri = ParseOptions(); ri.skip_rows = 1; ri.sep = ","
+    convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri),
+            None, tmp_path / "out", EdgesFormat.CSV_EDGELIST)
+    assert "," in (tmp_path / "out.csv").read_text().splitlines()[0]
+
+
+def test_use_u64_indices_on_read_errors(tmp_path):
+    """use_u64_indices is output-only; setting it on the read/input opts errors."""
+    edges = tmp_path / "edges.csv"
+    edges.write_text("src,dst\n0,1\n1,2\n")
+    bad = ParseOptions(); bad.skip_rows = 1; bad.use_u64_indices = True
+    with pytest.raises(Exception):
+        convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, bad),
+                None, tmp_path / "x", EdgesFormat.CSR_PARQUET)

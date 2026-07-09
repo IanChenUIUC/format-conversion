@@ -1,4 +1,4 @@
-# cross-library conversion benchmark
+# Track 2: cross-library conversion benchmark
 
 Wall-clock, peak-RSS, and output-size comparison of `format-conversion` against
 other graph-format converters, on a SLURM array. Each measurement is gated by a
@@ -11,10 +11,10 @@ The design follows a strict **shared-format rule**: a tool is only compared on a
 conversion where both the input and output formats are formats that tool natively
 reads/writes, so no tool is penalised for a format it was never meant to handle.
 
-| comparison  | tools                  | conversions                
-|---          |---                     |---                         
-| `networkit` | format_conv, networkit | `csv->metis`, `metis->csv` 
-| `icebug`    | format_conv, icebug    | `csv->csr`                 
+| comparison | tools | conversions | why it's fair |
+|---|---|---|---|
+| `networkit` | format_conv, networkit | `csv->metis`, `metis->csv` | identical text formats on both sides |
+| `icebug` | format_conv, icebug | `csv->csr` | both emit uint64 Parquet CSR |
 
 `format_conv` appears in every comparison and is also the **reference oracle**:
 its CSR build defines the canonical degree sequence every tool is checked against.

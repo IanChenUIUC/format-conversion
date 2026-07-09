@@ -58,6 +58,36 @@ def read_edgelist(path: Path, sep: str = ",", header: bool = True) -> frozenset:
     return frozenset(edges)
 
 
+def read_edgelist_arcs(path: Path, sep: str = ",", header: bool = False) -> list[tuple[int, int]]:
+    """Read a CSV edge list as a *directed*, order- and multiplicity-preserving
+    sorted list of (u, v) arcs (unlike read_edgelist, which folds to undirected
+    (min,max) and dedups). Use for directed-output assertions."""
+    arcs: list[tuple[int, int]] = []
+    with open(path) as f:
+        if header:
+            next(f)
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(sep)
+            arcs.append((int(parts[0]), int(parts[1])))
+    return sorted(arcs)
+
+
+def read_csr_arcs(base_path: Path) -> list[tuple[int, int]]:
+    """Read the CSR Parquet as directed arcs (u -> v) for every stored edgeKey,
+    preserving direction and multiplicity. Sorted for stable comparison."""
+    import pyarrow.parquet as pq
+    indices = pq.read_table(str(base_path) + ".indices.parquet").column(0).to_pylist()
+    indptr  = pq.read_table(str(base_path) + ".indptr.parquet").column(0).to_pylist()
+    arcs: list[tuple[int, int]] = []
+    for u in range(len(indptr) - 1):
+        for i in range(indptr[u], indptr[u + 1]):
+            arcs.append((u, indices[i]))
+    return sorted(arcs)
+
+
 def read_metis(path: Path) -> frozenset:
     """
     Read a METIS adjacency-list file.
