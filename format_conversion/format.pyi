@@ -1,20 +1,24 @@
 from __future__ import annotations
+import os
 import typing
-__all__: list[str] = ['CSR_PARQUET', 'CSV_EDGELIST', 'EdgesFormat', 'GraphDescriptor', 'METIS', 'NodeDescriptor', 'ParseOptions', 'convert', 'partition']
+__all__: list[str] = ['CSR_PARQUET', 'CSV_EDGELIST', 'EDGELIST_PARQUET', 'EdgesFormat', 'GraphDescriptor', 'METIS', 'NodeDescriptor', 'ParseOptions', 'convert', 'partition']
 class EdgesFormat:
     """
     Members:
-    
+
       CSV_EDGELIST
-    
+
       METIS
-    
+
       CSR_PARQUET
+
+      EDGELIST_PARQUET
     """
     CSR_PARQUET: typing.ClassVar[EdgesFormat]  # value = <EdgesFormat.CSR_PARQUET: 2>
     CSV_EDGELIST: typing.ClassVar[EdgesFormat]  # value = <EdgesFormat.CSV_EDGELIST: 0>
+    EDGELIST_PARQUET: typing.ClassVar[EdgesFormat]  # value = <EdgesFormat.EDGELIST_PARQUET: 3>
     METIS: typing.ClassVar[EdgesFormat]  # value = <EdgesFormat.METIS: 1>
-    __members__: typing.ClassVar[dict[str, EdgesFormat]]  # value = {'CSV_EDGELIST': <EdgesFormat.CSV_EDGELIST: 0>, 'METIS': <EdgesFormat.METIS: 1>, 'CSR_PARQUET': <EdgesFormat.CSR_PARQUET: 2>}
+    __members__: typing.ClassVar[dict[str, EdgesFormat]]  # value = {'CSV_EDGELIST': <EdgesFormat.CSV_EDGELIST: 0>, 'METIS': <EdgesFormat.METIS: 1>, 'CSR_PARQUET': <EdgesFormat.CSR_PARQUET: 2>, 'EDGELIST_PARQUET': <EdgesFormat.EDGELIST_PARQUET: 3>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -54,6 +58,8 @@ class ParseOptions:
     sort_neighbors: bool
     use_u64_indices: bool
     directed: bool
+    source_col: str
+    target_col: str
     def __init__(self) -> None:
         ...
     @property
@@ -75,13 +81,14 @@ class ParseOptions:
     def skip_rows(self, arg0: typing.SupportsInt) -> None:
         ...
 @typing.overload
-def convert(input: GraphDescriptor, nodes: NodeDescriptor = None, output_path: os.PathLike | str | bytes, output_fmt: EdgesFormat, output_opts: ParseOptions | None = None) -> None:
+def convert(input: GraphDescriptor, nodes: NodeDescriptor | None = None, output_path: os.PathLike | str | bytes, output_fmt: EdgesFormat, output_opts: ParseOptions | None = None) -> None:
     ...
 @typing.overload
 def convert(input: GraphDescriptor, nodes: NodeDescriptor, outputs: typing.Sequence[tuple[os.PathLike | str | bytes, EdgesFormat] | tuple[os.PathLike | str | bytes, EdgesFormat, ParseOptions | None]]) -> None:
     ...
-def partition(input: GraphDescriptor, nodes: NodeDescriptor = None, labels_path: os.PathLike | str | bytes, output_dir: os.PathLike | str | bytes, output_fmt: EdgesFormat, label_opts: ParseOptions = ..., batch_size: typing.SupportsInt = 18446744073709551615) -> None:
+def partition(input: GraphDescriptor, nodes: NodeDescriptor | None = None, labels_path: os.PathLike | str | bytes, output_dir: os.PathLike | str | bytes, output_fmt: EdgesFormat, label_opts: ParseOptions = ..., batch_size: typing.SupportsInt = 18446744073709551615) -> None:
     ...
 CSR_PARQUET: EdgesFormat  # value = <EdgesFormat.CSR_PARQUET: 2>
 CSV_EDGELIST: EdgesFormat  # value = <EdgesFormat.CSV_EDGELIST: 0>
+EDGELIST_PARQUET: EdgesFormat  # value = <EdgesFormat.EDGELIST_PARQUET: 3>
 METIS: EdgesFormat  # value = <EdgesFormat.METIS: 1>

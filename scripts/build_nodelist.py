@@ -29,6 +29,7 @@ def main() -> None:
             UNION ALL
             SELECT target AS node_id FROM edges
         )
+        ORDER BY node_id
     )
     TO {args.output!r}
     (FORMAT CSV, HEADER true);

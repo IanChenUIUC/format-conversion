@@ -2,7 +2,7 @@
 Usage:
     uv run python examples/demo_convert.py
 
-Example template for conversions between edgelists, CSR, and metis.
+Example template for conversions between edgelists (CSV or Parquet), CSR, and metis.
 """
 
 from pathlib import Path
@@ -25,6 +25,11 @@ def main() -> None:
     if input_fmt == fmt.EdgesFormat.CSV_EDGELIST:
         edge_opts.skip_rows = 1  # header
         edges_file = INPUT / "dnc_edges.csv"
+    if input_fmt == fmt.EdgesFormat.EDGELIST_PARQUET:
+        edges_file = INPUT / "dnc_edges.parquet"
+        # Column names default to the data-specification's source/target.
+        # edge_opts.source_col = "src"
+        # edge_opts.target_col = "dst"
     if input_fmt == fmt.EdgesFormat.CSR_PARQUET:
         edges_file = INPUT / "dnc.indices.parquet"
     if input_fmt == fmt.EdgesFormat.METIS:
@@ -36,6 +41,12 @@ def main() -> None:
 
     if output_fmt == fmt.EdgesFormat.CSV_EDGELIST:
         output_path = OUTPUT / "dnc_edges"
+    if output_fmt == fmt.EdgesFormat.EDGELIST_PARQUET:
+        output_path = OUTPUT / "dnc_edges"
+        output_opts = fmt.ParseOptions()
+        output_opts.use_u64_indices = True
+        # output_opts.source_col = "src"
+        # output_opts.target_col = "dst"
     if output_fmt == fmt.EdgesFormat.CSR_PARQUET:
         output_path = OUTPUT / "dnc"
         output_opts = fmt.ParseOptions()

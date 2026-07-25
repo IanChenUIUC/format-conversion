@@ -9,7 +9,7 @@ kept to interface/usage level; the reasoning lives here.
 |------|----------------|
 | `system.h` | OS/parallel primitives: `MmapFile`, `HugeArray`, `adviseHugePages`, `parallelStripes`. No graph knowledge. |
 | `formats.h` | Core types: `EdgesFormat`, `ParseOptions`, `NodeDescriptor`, `GraphDescriptor`. |
-| `graph_read.h` | Read paths → in-memory CSR (`DiGraphCsr`): node-id remapping, the CSV→CSR build, METIS/Parquet readers, `sortNeighbors`. |
+| `graph_read.h` | Read paths → in-memory CSR (`DiGraphCsr`): node-id remapping, the format-agnostic CSR build, METIS/Parquet readers, `sortNeighbors`. |
 | `graph_write.h` | Write paths from CSR: METIS, CSV, Parquet. |
 | `convert.h` / `partition.h` | User-facing pipelines. |
 | `format_wrap.cpp` | pybind11 bindings. |
@@ -19,16 +19,18 @@ O=uint64_t>` — CSR with `offsets` (`O`) and `edgeKeys` (`K`). By default the
 build stores a symmetric CSR (both directions of each edge); with
 `ParseOptions::directed` it stores only the out-arcs `u→v`.
 
-## CSV → CSR build (`buildCSRFromCSV`)
+## Edge source → CSR build (`buildCSRFromEdgeSource`)
 
-Two passes over the mmap'd text, parallel over `num_threads`, with
-**no atomics on the per-edge path**:
+The degree-count / prefix-sum / scatter skeleton is format-agnostic: it takes a
+`forEachStripe(t, T, cb)` callable that yields thread `t`'s share of the already
+remapped and filtered edges. CSV supplies byte blocks, Parquet supplies row groups.
+Two passes, parallel over `num_threads`, with **no atomics on the per-edge path**:
 
-1. The file is tiled into 1 MB line-aligned blocks. Thread `t` owns blocks
-   `t, t+T, 2T, …` — a round-robin assignment that interleaves dense and sparse
-   regions so one hub-heavy region can't stall a pass (social-network inputs are
-   highly skewed). The assignment depends only on `(t, T)`, so it is identical in
-   both passes.
+1. The input is tiled into units — 1 MB line-aligned blocks for CSV, row groups for
+   Parquet. Thread `t` owns units `t, t+T, 2T, …` — a round-robin assignment that
+   interleaves dense and sparse regions so one hub-heavy region can't stall a pass
+   (social-network inputs are highly skewed). The assignment depends only on
+   `(t, T)`, so it is identical in both passes.
 2. **Pass 1** counts degrees into a private per-thread row of a flat `T×N`
    table (`tdeg`), so no two threads touch the same counter. Row-major by thread
    keeps each thread's row contiguous and avoids false sharing.
@@ -40,11 +42,55 @@ Two passes over the mmap'd text, parallel over `num_threads`, with
    is written exactly once, so `edgeKeys` needs no zeroing.
 
 Correctness depends on `parallelStripes` using `schedule(static)` so iteration
-`t` maps to the same thread (hence the same blocks and cursor row) across passes.
+`t` maps to the same thread (hence the same units and cursor row) across passes.
 
 Scratch memory is `T × N × sizeof(O)`. This is the main scaling cost: at very
 high thread counts and node counts it grows large (the path to ~60B edges would
 want per-*block* rather than per-*thread* accumulation — deferred).
+
+Every reader funnels its raw endpoint pairs through `mapRawEdge`, which applies
+`base_index`, the narrowing check against `K`, the `NodeMap` lookup and the
+self-loop rule. Keeping it in one place is what stops the filtering rules from
+drifting apart between formats.
+
+## Parquet edge list
+
+A single file with two id columns (`source`/`target` by default, overridable);
+other columns are never decoded because the reader passes explicit column indices
+to `ReadRowGroup`.
+
+**The file is decoded twice** — once to count degrees, once to scatter — rather
+than decoded once into a buffer. Decoding twice is the more expensive option in
+CPU, but buffering the decoded edge list would add `2 × E × sizeof(K)` resident
+bytes, roughly doubling the edge-side footprint next to `edgeKeys` itself. At the
+target scale (~5B edges) memory is the binding constraint, not CPU, so the
+resident cost buys more than the decode does. The single-decode variant (with an
+optional spill to a caller-chosen directory) is deferred until the double-decode
+cost has actually been measured on a real graph.
+
+Each thread opens **its own `parquet::arrow::FileReader`**: concurrent
+`ReadRowGroup` on a shared reader is not documented as thread-safe. A file with
+one row group therefore reads serially no matter the thread count.
+
+Dense mode (no node list) needs `max(id)+1` up front, and row-group statistics
+carry it in the footer for no decode at all. They are only *usable*, though, when
+they cannot disagree with a scan: statistics describe every row, whereas a scan
+sees only the edges that survive filtering, so the two differ whenever the largest
+id appears solely on a dropped edge. In dense mode an edge is dropped only by the
+self-loop rule or a `base_index` underflow, so the footer is taken as
+authoritative exactly when `keep_self_loops` is set and `base_index` is zero, and
+otherwise `N` is discovered by scanning — which is what the CSV path does.
+
+Without that guard the same file yields a different `N` depending on whether its
+*writer* happened to record statistics, which is not a property the reader should
+be sensitive to. The cost is that the default configuration pays one extra decode
+pass in dense mode; with a node list, `N` comes from the node list and no such
+pass exists either way.
+
+Note also that Parquet has no unsigned physical types — a `uint32` column is
+stored as `INT32` with an unsigned *logical* type — so the statistic is typed on
+the physical type and must be **reinterpreted** rather than sign-extended, or ids
+above `2^31` come back negative.
 
 ## Node-id remapping (`NodeMap`)
 
@@ -83,7 +129,9 @@ than cache. Two independent concerns:
 
 Two single-column files (`.indices.parquet`, `.indptr.parquet`). Both columns are
 wrapped zero-copy from the CSR vectors (no cast/copy); indices are written at
-their native `K` width (uint32 by default), not widened to uint64.
+their native `K` width (uint32 by default), not widened to uint64. Requesting
+`use_u64_indices` is the one case that cannot be zero-copy, and it streams rather
+than copying (see below).
 
 These files are the long-term on-disk form, tuned for size:
 
@@ -100,6 +148,34 @@ These files are the long-term on-disk form, tuned for size:
 For a low-latency / zero-copy consumer, convert these to Feather/Arrow IPC, which
 is the throughput-oriented format; that conversion is standard and need not be
 optimised here.
+
+## Writing columns that do not exist in memory (`writeParquetIdColumns`)
+
+Zero-copy works only when a column already *is* a contiguous array. Two outputs
+are not:
+
+- `use_u64_indices` with `K = uint32`, where the widened values exist nowhere;
+- the Parquet edge list, whose `source`/`target` columns are a re-derivation of
+  the CSR and are not stored anywhere in that shape.
+
+Both stream instead: `fillChunk(row_begin, row_end, bufs)` materialises a window
+into reused scratch, which is wrapped zero-copy and handed to
+`parquet::arrow::FileWriter::WriteRecordBatch`. Peak scratch is
+`PARQUET_CHUNK_ROWS × ncols × sizeof(Id)` (~16 MB for a two-column uint64 write)
+rather than a whole second copy of `edgeKeys`.
+
+Chunk size is *not* row-group size. `WriteRecordBatch` accumulates batches into a
+row group up to `max_row_group_length`, so writing 1Mi-row chunks under a 16Mi-row
+group limit still produces 16Mi-row groups — the on-disk layout is unchanged from
+the single `WriteTable` this replaced.
+
+The edge-list writer places rows the same way `writeLinesMmap` places bytes: count
+rows per vertex, prefix-sum to absolute positions, fill in parallel. Undirected
+counts only `v > u` (matching the CSV writer's dedup); directed emits every arc,
+so `g.offsets` already *is* the row mapping and no counting pass is needed. A
+vertex whose rows straddle a chunk boundary is visited from both chunks and writes
+only the part inside the current one. The file itself is written serially — one
+`FileWriter`, no concurrent row-group writes.
 
 ## Adjacency sort (`sortNeighbors`)
 
@@ -131,3 +207,6 @@ threads spawn.
   that).
 - Build scratch is `T×N×8`
 - `partition`, the CSV writer, and the METIS reader are single-threaded cold paths.
+- The Parquet edge list decodes twice. A single-decode read, buffering the decoded
+  edges in memory or spilling them to a caller-chosen directory, is deferred until
+  the double-decode cost is measured on a real graph.

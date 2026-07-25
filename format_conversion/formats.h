@@ -10,12 +10,14 @@
 
 #include "system.h"
 
-// Supported on-disk edge representations.
+// Supported on-disk edge representations. Values are appended, never reordered:
+// they appear in serialised benchmark configs.
 enum EdgesFormat
 {
     CSV_EDGELIST,
     METIS,
-    CSR_PARQUET
+    CSR_PARQUET,
+    EDGELIST_PARQUET
 };
 
 // Parsing and output options.
@@ -32,6 +34,10 @@ enum EdgesFormat
 //                       match tools that store 64-bit node ids (e.g. the icebug
 //                       benchmark). Setting this on options used for *reading* is
 //                       an error — it belongs on the output_opts of convert().
+//   source_col,
+//   target_col        : EDGELIST_PARQUET column names, on both the read and the
+//                       write side. Default to the data-specification's
+//                       "source"/"target".
 //   directed          : treat edges as directed rather than undirected. On the
 //                       READ side: false (default) symmetrizes each parsed edge
 //                       (adds u->v and v->u); true adds only the arc u->v. On the
@@ -53,6 +59,8 @@ struct ParseOptions
     bool sort_neighbors = false;
     bool use_u64_indices = false;
     bool directed = false;
+    std::string source_col = "source";
+    std::string target_col = "target";
 };
 
 // An input node list (provides id remapping and any extra node columns).

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from .helpers import read_metis, read_edgelist, read_csr_parquet
+from .helpers import read_metis, read_edgelist, read_csr_parquet, read_edgelist_parquet
 
 try:
     from format_conversion.format import EdgesFormat, ParseOptions, GraphDescriptor
@@ -46,9 +46,10 @@ class Format:
         o = opts or ParseOptions()
         # Must match the extensions appended by writeGraph/writeGraphToX
         extensions = {
-            EdgesFormat.METIS:        ".metis",
-            EdgesFormat.CSV_EDGELIST: ".csv",
-            EdgesFormat.CSR_PARQUET:  ".indices.parquet",
+            EdgesFormat.METIS:            ".metis",
+            EdgesFormat.CSV_EDGELIST:     ".csv",
+            EdgesFormat.CSR_PARQUET:      ".indices.parquet",
+            EdgesFormat.EDGELIST_PARQUET: ".parquet",
         }
         path = str(base) + extensions.get(self._fmt, "")
         return GraphDescriptor(path, self._fmt, o)
@@ -71,6 +72,9 @@ def _read_csv(base: Path) -> frozenset:
 def _read_parquet(base: Path) -> frozenset:
     return read_csr_parquet(base)      # helper already knows the two-file convention
 
+def _read_edgelist_parquet(base: Path) -> frozenset:
+    return read_edgelist_parquet(Path(str(base) + ".parquet"))
+
 
 def _make_formats() -> dict[str, Format]:
     if not _LOADED:
@@ -79,6 +83,8 @@ def _make_formats() -> dict[str, Format]:
         "metis":   Format("metis",   EdgesFormat.METIS,        _read_metis),
         "csv":     Format("csv",     EdgesFormat.CSV_EDGELIST,  _read_csv),
         "parquet": Format("parquet", EdgesFormat.CSR_PARQUET,   _read_parquet),
+        "edgelist_parquet": Format("edgelist_parquet", EdgesFormat.EDGELIST_PARQUET,
+                                   _read_edgelist_parquet),
     }
 
 

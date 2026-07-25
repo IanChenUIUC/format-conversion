@@ -10,7 +10,9 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 from .formats import FORMATS, Format
-from .helpers import write_edgelist, read_edgelist_arcs, read_csr_arcs
+from .helpers import (write_edgelist, read_edgelist_arcs, read_csr_arcs,
+                      write_edgelist_parquet, read_edgelist_parquet,
+                      read_edgelist_parquet_arcs)
 
 try:
     from format_conversion.format import (
@@ -427,3 +429,171 @@ def test_convert_multi_empty_is_noop(tmp_path):
     ri = ParseOptions(); ri.skip_rows = 1
     convert(GraphDescriptor(str(edges), EdgesFormat.CSV_EDGELIST, ri), None, [])
     assert list(tmp_path.glob("*.csv")) == [edges]
+
+
+# ── EDGELIST_PARQUET ──────────────────────────────────────────────────────────
+#
+# The format registry already covers round trips, edge sets and counts. These
+# pin the behaviour specific to a columnar edge list.
+
+def _opts(**kw) -> ParseOptions:
+    o = ParseOptions()
+    for k, v in kw.items():
+        setattr(o, k, v)
+    return o
+
+
+def _pq_in(path, **kw) -> GraphDescriptor:
+    return GraphDescriptor(str(path), EdgesFormat.EDGELIST_PARQUET, _opts(**kw))
+
+
+def test_edgelist_parquet_custom_column_names(tmp_path):
+    """Column names are configurable on both the read and the write side."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(0, 1), (1, 2), (0, 2)], source_col="src", target_col="dst")
+
+    out = tmp_path / "out"
+    o = ParseOptions(); o.source_col = "src"; o.target_col = "dst"
+    convert(_pq_in(src, source_col="src", target_col="dst"), None,
+            out, EdgesFormat.EDGELIST_PARQUET, o)
+
+    import pyarrow.parquet as pq
+    assert pq.read_table(str(out) + ".parquet").schema.names == ["src", "dst"]
+    assert read_edgelist_parquet(Path(str(out) + ".parquet"), "src", "dst") == \
+        frozenset([(0, 1), (1, 2), (0, 2)])
+
+
+def test_edgelist_parquet_missing_column_raises(tmp_path):
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(0, 1)])
+    with pytest.raises(Exception, match="not found"):
+        convert(_pq_in(src, source_col="nope"), None, tmp_path / "o", EdgesFormat.CSV_EDGELIST)
+
+
+@pytest.mark.parametrize("opt,value", [("skip_rows", 1), ("sep", "\t"), ("comment_char", "%")])
+def test_edgelist_parquet_rejects_text_options(tmp_path, opt, value):
+    """Text-parsing options cannot apply to a columnar input, so they raise rather
+    than being silently ignored."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(0, 1)])
+    with pytest.raises(Exception):
+        convert(_pq_in(src, **{opt: value}), None, tmp_path / "o", EdgesFormat.CSV_EDGELIST)
+
+
+def test_edgelist_parquet_directed_preserves_arcs(tmp_path):
+    """directed=True stores only u->v and emits every stored arc."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(0, 1), (2, 1), (1, 3)])
+    out = tmp_path / "out"
+    convert(_pq_in(src, directed=True), None, out, EdgesFormat.EDGELIST_PARQUET,
+            _opts(directed=True))
+    assert read_edgelist_parquet_arcs(Path(str(out) + ".parquet")) == [(0, 1), (1, 3), (2, 1)]
+
+
+def test_edgelist_parquet_multi_row_group_thread_invariance(tmp_path):
+    """Row groups are striped across threads, so the result must not depend on
+    thread count. row_group_size=2 forces many row groups over few edges."""
+    edges = [(i, i + 1) for i in range(50)]
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, edges, row_group_size=2)
+
+    seq, par = tmp_path / "seq", tmp_path / "par"
+    convert(_pq_in(src, sort_neighbors=True), None, seq, EdgesFormat.CSR_PARQUET)
+    convert(_pq_in(src, sort_neighbors=True, num_threads=8), None, par, EdgesFormat.CSR_PARQUET)
+    assert read_csr_arcs(par) == read_csr_arcs(seq)
+    assert FORMATS["parquet"].read(par) == frozenset((u, v) for u, v in edges)
+
+
+@pytest.mark.parametrize("statistics", [True, False], ids=["stats", "no_stats"])
+@pytest.mark.parametrize("keep_self_loops", [True, False], ids=["keep_loops", "drop_loops"])
+def test_edgelist_parquet_dense_mode(tmp_path, statistics, keep_self_loops):
+    """Dense-mode N must not depend on whether the file's writer recorded
+    statistics. The statistics fast path is only taken where it provably agrees
+    with a scan, so all four combinations give the same N."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(0, 1), (1, 2)], statistics=statistics)
+    out = tmp_path / "out"
+    convert(_pq_in(src, keep_self_loops=keep_self_loops), None, out, EdgesFormat.CSR_PARQUET)
+
+    import pyarrow.parquet as pq
+    assert pq.read_table(str(out) + ".indptr.parquet").num_rows == 4  # N=3 -> N+1 offsets
+    assert FORMATS["parquet"].read(out) == frozenset([(0, 1), (1, 2)])
+
+
+@pytest.mark.parametrize("statistics", [True, False], ids=["stats", "no_stats"])
+def test_edgelist_parquet_dense_n_ignores_statistics(tmp_path, statistics):
+    """Vertex 3 appears only in a self-loop, which is dropped by default. Statistics
+    describe every row and would report N=4; a scan sees only surviving edges and
+    reports N=2. N must not vary with the presence of statistics, and must match
+    what the CSV reader produces for the same graph."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(0, 1), (3, 3)], statistics=statistics)
+    out = tmp_path / "out"
+    convert(_pq_in(src), None, out, EdgesFormat.CSR_PARQUET)
+
+    csv_src = tmp_path / "in.csv"
+    write_edgelist(csv_src, [(0, 1), (3, 3)], header=False)
+    csv_out = tmp_path / "csv_out"
+    convert(GraphDescriptor(str(csv_src), EdgesFormat.CSV_EDGELIST, ParseOptions()), None,
+            csv_out, EdgesFormat.CSR_PARQUET)
+
+    import pyarrow.parquet as pq
+    n = pq.read_table(str(out) + ".indptr.parquet").num_rows
+    assert n == pq.read_table(str(csv_out) + ".indptr.parquet").num_rows
+    assert n == 3  # N=2 -> N+1 offsets
+
+
+def test_edgelist_parquet_u64_ids(tmp_path):
+    """use_u64_indices widens the emitted id columns, and 64-bit ids round trip."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(0, 1), (1, 2)], dtype="uint64")
+    out = tmp_path / "out"
+    convert(_pq_in(src), None, out, EdgesFormat.EDGELIST_PARQUET, _opts(use_u64_indices=True))
+
+    import pyarrow as pa, pyarrow.parquet as pq
+    schema = pq.read_table(str(out) + ".parquet").schema
+    assert schema.field("source").type == pa.uint64()
+    assert schema.field("target").type == pa.uint64()
+
+
+def test_edgelist_parquet_self_loops(tmp_path):
+    """Self-loops follow the same rule as every other reader."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(0, 0), (0, 1)])
+
+    dropped, kept = tmp_path / "dropped", tmp_path / "kept"
+    convert(_pq_in(src), None, dropped, EdgesFormat.CSR_PARQUET)
+    convert(_pq_in(src, keep_self_loops=True), None, kept, EdgesFormat.CSR_PARQUET)
+    assert read_csr_arcs(dropped) == [(0, 1), (1, 0)]
+    assert (0, 0) in read_csr_arcs(kept)
+
+
+def test_edgelist_parquet_empty(tmp_path):
+    """An empty edge list writes a well-formed, readable file."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [])
+    out = tmp_path / "out"
+    convert(_pq_in(src), None, out, EdgesFormat.EDGELIST_PARQUET)
+
+    import pyarrow.parquet as pq
+    t = pq.read_table(str(out) + ".parquet")
+    assert t.num_rows == 0 and t.schema.names == ["source", "target"]
+
+
+def test_u64_csr_indices_match_u32(tmp_path):
+    """The streaming widening path must produce the same values as the zero-copy
+    native-width path, only wider."""
+    src = tmp_path / "in.parquet"
+    write_edgelist_parquet(src, [(i, (i * 7) % 40) for i in range(200)], row_group_size=16)
+
+    narrow, wide = tmp_path / "narrow", tmp_path / "wide"
+    convert(_pq_in(src, sort_neighbors=True), None, narrow, EdgesFormat.CSR_PARQUET)
+    convert(_pq_in(src, sort_neighbors=True), None, wide, EdgesFormat.CSR_PARQUET,
+            _opts(use_u64_indices=True))
+
+    import pyarrow as pa, pyarrow.parquet as pq
+    n = pq.read_table(str(narrow) + ".indices.parquet")
+    w = pq.read_table(str(wide) + ".indices.parquet")
+    assert n.schema.field(0).type == pa.uint32()
+    assert w.schema.field(0).type == pa.uint64()
+    assert n.column(0).to_pylist() == w.column(0).to_pylist()

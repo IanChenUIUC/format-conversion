@@ -31,6 +31,24 @@ def write_nodelist(path: Path, nodes: list[int],
             f.write(f"{n}{extra}\n")
 
 
+def write_edgelist_parquet(path: Path, edges: list[tuple[int, int]],
+                           source_col: str = "source", target_col: str = "target",
+                           row_group_size: int | None = None,
+                           statistics: bool = True, dtype: str = "uint32") -> None:
+    """Write a Parquet edge list. row_group_size forces multiple row groups, which
+    is what makes the reader's per-thread striping observable on a small fixture."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    typ = pa.uint32() if dtype == "uint32" else getattr(pa, dtype)()
+    table = pa.table({
+        source_col: pa.array([u for u, _ in edges], type=typ),
+        target_col: pa.array([v for _, v in edges], type=typ),
+    })
+    pq.write_table(table, path, use_dictionary=False, compression="zstd",
+                   write_statistics=statistics,
+                   **({"row_group_size": row_group_size} if row_group_size else {}))
+
+
 def write_labels(path: Path, labels: list[int]) -> None:
     """One label per line, ordered by compact node ID (i.e. position in nodelist)."""
     with open(path, "w") as f:
@@ -86,6 +104,23 @@ def read_csr_arcs(base_path: Path) -> list[tuple[int, int]]:
         for i in range(indptr[u], indptr[u + 1]):
             arcs.append((u, indices[i]))
     return sorted(arcs)
+
+
+def read_edgelist_parquet(path: Path, source_col: str = "source",
+                          target_col: str = "target") -> frozenset:
+    """Read a Parquet edge list as undirected (min,max) pairs."""
+    import pyarrow.parquet as pq
+    t = pq.read_table(path)
+    return frozenset(_edge(u, v) for u, v in zip(t[source_col].to_pylist(),
+                                                 t[target_col].to_pylist()))
+
+
+def read_edgelist_parquet_arcs(path: Path, source_col: str = "source",
+                               target_col: str = "target") -> list[tuple[int, int]]:
+    """Read a Parquet edge list as directed, multiplicity-preserving sorted arcs."""
+    import pyarrow.parquet as pq
+    t = pq.read_table(path)
+    return sorted(zip(t[source_col].to_pylist(), t[target_col].to_pylist()))
 
 
 def read_metis(path: Path) -> frozenset:

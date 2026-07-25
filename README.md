@@ -30,6 +30,44 @@ Robinhood provides a faster alternative to `unordered_map`.
 The main patterns are described in the `examples/` folder, with format conversion as well as extracting subgraphs according to a partition.
 Any input formats can be read or written to through the python or cpp API.
 
+### Parquet edge lists
+
+`EdgesFormat.EDGELIST_PARQUET` reads and writes an edge list stored as Parquet: a
+single file with two id columns, named `source` and `target` after the
+[data-specification](https://github.com/illinois-or-research-analytics/data-specification/blob/main/formats.md).
+Any other columns in an input file are ignored (and never decoded). Reading
+accepts `uint32`, `uint64`, `int32` and `int64` columns; writing emits the CSR's
+native index width, or `uint64` when `use_u64_indices` is set.
+
+The path carries no special suffix — output writes `{output_path}.parquet`, and an
+input is any `.parquet` file. Note that a CSR `.indices.parquet` also ends in
+`.parquet`, so the two Parquet formats are distinguished by the `EdgesFormat`
+argument, never by the file name.
+
+```python
+opts = fmt.ParseOptions()
+opts.source_col = "src"      # optional; defaults to "source"
+opts.target_col = "dst"      # optional; defaults to "target"
+graph = fmt.GraphDescriptor("edges.parquet", fmt.EdgesFormat.EDGELIST_PARQUET, opts)
+fmt.convert(graph, nodes, "out/g", fmt.EdgesFormat.CSR_PARQUET)
+```
+
+`sep`, `comment_char` and `skip_rows` describe text parsing and cannot apply to a
+columnar input; setting them on a Parquet input raises rather than being silently
+ignored.
+
+### Parquet node lists
+
+Node lists must be CSV. A node list is `N` rows rather than `E`, so converting one
+externally is cheap even when converting an edge list would not be — for a graph
+with 272M nodes it is ~2.7 GB of text, against ~100 GB for a 5B-edge list, which is
+why the edge list is supported natively and this is not:
+
+```python
+import polars as pl
+pl.scan_parquet("nodes.parquet").sink_csv("nodes.csv")
+```
+
 ### Directed graphs
 
 By default graphs are treated as **undirected**: each parsed edge is symmetrized
@@ -38,11 +76,11 @@ By default graphs are treated as **undirected**: each parsed edge is symmetrized
 **directed** instead: reading stores only the arc `u→v` (no symmetrization) and
 the edgelist writer emits every stored arc.
 
-`directed` is meaningful for `CSV_EDGELIST` and `CSR_PARQUET`. METIS is an
-undirected adjacency format, so requesting directed **METIS output** raises an
-error. Note that `CSR_PARQUET` and METIS files carry no direction bit on disk;
-`directed` describes how a given `convert` call interprets and emits edges, so set
-it consistently across a round trip.
+`directed` is meaningful for `CSV_EDGELIST`, `EDGELIST_PARQUET` and `CSR_PARQUET`.
+METIS is an undirected adjacency format, so requesting directed **METIS output**
+raises an error. Note that no format carries a direction bit on disk; `directed`
+describes how a given `convert` call interprets and emits edges, so set it
+consistently across a round trip.
 
 ### Separate read and write options
 
@@ -90,13 +128,20 @@ order.
 While most of this is I/O bound, parallelism may help, depending on the architecture.
 Here is an ongoing list of which readers and writers support parallelism:
 
-| Format   | Input | Ouput |
-|--------- |-------|-------|
-| Edgelist | Yes   | No    |
-| CSR      | Yes*  | Yes*  |
-| METIS    | No    | Yes   |
+| Format            | Input | Ouput |
+|------------------ |-------|-------|
+| Edgelist          | Yes   | No    |
+| Edgelist (Parquet)| Yes†  | Yes‡  |
+| CSR               | Yes*  | Yes*  |
+| METIS             | No    | Yes   |
 
 *Arrow parallelism is system dependant and is not explicitly controlled.
+
+†Row groups are striped across threads, so a single-row-group file reads serially
+regardless of `num_threads`.
+
+‡Rows are materialised in parallel, but the file itself is written by a single
+writer.
 
 Set `ParseOptions.num_threads` to the core count to parallelise the CSV→CSR build
 (and the neighbor sort, when `sort_neighbors` is enabled).

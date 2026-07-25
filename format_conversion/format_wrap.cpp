@@ -19,6 +19,7 @@ PYBIND11_MODULE(format, m)
         .value("CSV_EDGELIST", EdgesFormat::CSV_EDGELIST)
         .value("METIS", EdgesFormat::METIS)
         .value("CSR_PARQUET", EdgesFormat::CSR_PARQUET)
+        .value("EDGELIST_PARQUET", EdgesFormat::EDGELIST_PARQUET)
         .export_values();
 
     // ── ParseOptions ─────────────────────────────────────────────────────────
@@ -33,7 +34,9 @@ PYBIND11_MODULE(format, m)
         .def_readwrite("keep_self_loops", &ParseOptions::keep_self_loops)
         .def_readwrite("sort_neighbors", &ParseOptions::sort_neighbors)
         .def_readwrite("use_u64_indices", &ParseOptions::use_u64_indices)
-        .def_readwrite("directed", &ParseOptions::directed);
+        .def_readwrite("directed", &ParseOptions::directed)
+        .def_readwrite("source_col", &ParseOptions::source_col)
+        .def_readwrite("target_col", &ParseOptions::target_col);
 
     // ── NodeDescriptor ───────────────────────────────────────────────────────
 
