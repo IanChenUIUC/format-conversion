@@ -106,14 +106,18 @@ std::string get(const std::vector<std::string> &row, const std::vector<std::stri
     return row[i];
 }
 
-EdgesFormat parseFormat(const std::string &s)
+GraphSpec parseReadSpec(const std::string &s, size_t skip_rows)
 {
     if (s == "csv" || s == "csv_edgelist")
-        return CSV_EDGELIST;
+    {
+        CsvEdgelistRead r;
+        r.skip_rows = skip_rows;
+        return r;
+    }
     if (s == "metis")
-        return METIS;
+        return MetisRead{};
     if (s == "csr_parquet" || s == "parquet")
-        return CSR_PARQUET;
+        return CsrParquetRead{};
     throw std::runtime_error("unknown format: " + s);
 }
 
@@ -272,20 +276,17 @@ int main(int argc, char **argv)
 
         std::cerr << "[build] " << mr.name << " (" << mr.format << ") ..." << std::flush;
 
-        ParseOptions opts;
-        opts.num_threads = static_cast<size_t>(build_threads);
-        opts.skip_rows = mr.skip_rows;
-
-        GraphDescriptor gd(mr.path, parseFormat(mr.format), opts);
+        GraphDescriptor gd(mr.path, parseReadSpec(mr.format, mr.skip_rows));
         std::unique_ptr<NodeDescriptor> nd;
         if (!mr.nodes.empty())
         {
-            ParseOptions nopts;
-            nopts.skip_rows = mr.skip_rows;
-            nd = std::make_unique<NodeDescriptor>(mr.nodes, nopts);
+            NodelistCsv nspec;
+            nspec.skip_rows = mr.skip_rows;
+            nd = std::make_unique<NodeDescriptor>(mr.nodes, nspec);
         }
 
-        DiGraphCsr<K, O> g = buildGraph<K, O>(gd, nd.get());
+        DiGraphCsr<K, O> g =
+            buildGraph<K, O>(gd, nd.get(), static_cast<size_t>(build_threads)).g;
         const size_t n = g.span(), m = g.size() / 2;
         std::cerr << " n=" << n << " m=" << m << "\n";
 

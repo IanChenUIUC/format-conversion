@@ -86,15 +86,17 @@ void writeLinesMmap(const std::string &path, size_t n, std::string_view header, 
 // Write the CSR as a METIS adjacency-list file. Parallelised over num_threads.
 
 template <class K, class O>
-void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
+void writeGraphToMetis(const BuiltGraph<K, O> &bg, const std::string &output_path, const MetisWrite &,
+                       size_t num_threads)
 {
     // METIS is an undirected adjacency format; its header edge count assumes a
-    // symmetric graph (m = total arcs / 2). A directed graph has no faithful
-    // METIS representation, so reject it rather than emit a wrong count.
-    if (opts.directed)
-        throw std::runtime_error("METIS output is undirected-only; directed=true is not supported for METIS "
-                                 "(use CSV_EDGELIST or CSR_PARQUET for directed graphs)");
+    // symmetric graph (m = total arcs / 2). A graph stored as arcs only has no
+    // faithful METIS representation, so reject it rather than emit a wrong count.
+    if (!bg.symmetric)
+        throw std::runtime_error("METIS output is undirected-only; this graph stores arcs only "
+                                 "(use CsvEdgelist.Write or CsrParquet.Write for directed graphs)");
 
+    const DiGraphCsr<K, O> &g = bg.g;
     const size_t n = g.span(), m = g.size() / 2;
     char header[64];
     int hlen = snprintf(header, sizeof(header), "%zu %zu\n", n, m);
@@ -122,7 +124,7 @@ void writeGraphToMetis(const DiGraphCsr<K, O> &g, const std::string &output_path
         *p = '\n';
     };
 
-    writeLinesMmap(output_path + ".metis", n, std::string_view(header, hlen), lineBytes, writeLine, opts.num_threads);
+    writeLinesMmap(output_path + ".metis", n, std::string_view(header, hlen), lineBytes, writeLine, num_threads);
 }
 
 // Large row groups; Parquet still streams pages within a group.
@@ -216,20 +218,23 @@ void writeParquetIdColumns(const std::string &path, const std::vector<std::strin
 // rationale and the note on converting to Feather for zero-copy consumers.
 
 template <class K, class O>
-void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
+void writeGraphToParquet(const BuiltGraph<K, O> &bg, const std::string &output_path, const CsrParquetWrite &spec,
+                         size_t)
 {
     static_assert(sizeof(O) == 8, "offsets (O) must be uint64_t");
     static_assert(sizeof(K) == 4 || sizeof(K) == 8, "indices (K) must be 32- or 64-bit unsigned");
 
+    const DiGraphCsr<K, O> &g = bg.g;
+
     // Indices column. Default: emit K-width (uint32 when K=uint32) zero-copy.
-    // When use_u64_indices is requested and K is narrower than 64-bit, the widened
+    // When u64_indices is requested and K is narrower than 64-bit, the widened
     // values exist nowhere in memory, so they are streamed a chunk at a time rather
     // than materialising a second copy of edgeKeys.
-    if (opts.use_u64_indices && sizeof(K) < 8)
+    if (spec.u64_indices && sizeof(K) < 8)
     {
         const K *keys = g.edgeKeys.data();
         writeParquetIdColumns<uint64_t>(
-            output_path + ".indices.parquet", {"indices"}, static_cast<int64_t>(g.edgeKeys.size()),
+            output_path + ".indices.parquet", {spec.indices_col}, static_cast<int64_t>(g.edgeKeys.size()),
             [keys](int64_t begin, int64_t end, std::vector<std::vector<uint64_t>> &bufs) {
                 for (int64_t i = begin; i < end; ++i)
                     bufs[0][static_cast<size_t>(i - begin)] = static_cast<uint64_t>(keys[i]);
@@ -238,36 +243,45 @@ void writeGraphToParquet(const DiGraphCsr<K, O> &g, const std::string &output_pa
     else
     {
         auto idx_type = sizeof(K) == 4 ? arrow::uint32() : arrow::uint64();
-        writeParquetColumn(output_path + ".indices.parquet", "indices",
+        writeParquetColumn(output_path + ".indices.parquet", spec.indices_col,
                            wrapZeroCopy(g.edgeKeys.data(), static_cast<int64_t>(g.edgeKeys.size()), idx_type));
     }
-    writeParquetColumn(output_path + ".indptr.parquet", "indptr",
+    writeParquetColumn(output_path + ".indptr.parquet", spec.indptr_col,
                        wrapZeroCopy(g.offsets.data(), static_cast<int64_t>(g.offsets.size()), arrow::uint64()));
 }
 
-// Write a headerless CSV edge list. Undirected (default): one "u{sep}v" line per
-// edge, emitted once with u<v (the CSR is symmetric, so the v<u copy is skipped).
-// Directed (opts.directed): one line per stored arc u->v, every arc emitted.
+// Whether a writer emits every stored arc rather than one row per edge. A graph
+// stored as arcs only has no duplicate to drop; a symmetric graph drops the v<u
+// copy unless the caller asks for both directions back.
+template <class K, class O, class Spec>
+inline bool emitsEveryArc(const BuiltGraph<K, O> &bg, const Spec &spec)
+{
+    return !bg.symmetric || spec.expand_symmetric;
+}
+
+// Write a headerless CSV edge list: one "u{sep}v" line per emitted row.
 // Parallelised over num_threads.
 
 template <class K, class O>
-void writeGraphToCSV(const DiGraphCsr<K, O> &g, const std::string &output_path, const ParseOptions &opts = {})
+void writeGraphToCSV(const BuiltGraph<K, O> &bg, const std::string &output_path, const CsvEdgelistWrite &spec,
+                     size_t num_threads)
 {
+    const DiGraphCsr<K, O> &g = bg.g;
     const size_t n = g.span();
-    const char sep = opts.sep;
-    const bool directed = opts.directed;
+    const char sep = spec.sep;
+    const bool every_arc = emitsEveryArc(bg, spec);
 
     auto lineBytes = [&](size_t u) {
         size_t bytes = 0;
         g.forEachEdgeKey((K)u, [&](K v) {
-            if (directed || v > (K)u)
+            if (every_arc || v > (K)u)
                 bytes += numDigits((uint32_t)u) + 1 + numDigits((uint32_t)v) + 1;
         });
         return bytes;
     };
     auto writeLine = [&](size_t u, char *p) {
         g.forEachEdgeKey((K)u, [&](K v) {
-            if (directed || v > (K)u)
+            if (every_arc || v > (K)u)
             {
                 p = std::to_chars(p, p + 11, (uint32_t)u).ptr;
                 *p++ = sep;
@@ -277,12 +291,11 @@ void writeGraphToCSV(const DiGraphCsr<K, O> &g, const std::string &output_path, 
         });
     };
 
-    writeLinesMmap(output_path + ".csv", n, {}, lineBytes, writeLine, opts.num_threads);
+    writeLinesMmap(output_path + ".csv", n, {}, lineBytes, writeLine, num_threads);
 }
 
 // Write the CSR as a Parquet edge list: one file, two id columns named by
-// opts.source_col / opts.target_col. Undirected (default) emits each edge once as
-// u,v with u<v, matching the CSV writer; directed emits every stored arc.
+// spec.source_col / spec.target_col, matching the CSV writer's row selection.
 //
 // Neither column exists as contiguous memory in a CSR, so rows are materialised a
 // chunk at a time rather than building both columns in full. Row placement mirrors
@@ -290,17 +303,18 @@ void writeGraphToCSV(const DiGraphCsr<K, O> &g, const std::string &output_path, 
 // fill in parallel. The file itself is written serially — one FileWriter.
 
 template <class K, class O>
-void writeGraphToEdgelistParquet(const DiGraphCsr<K, O> &g, const std::string &output_path,
-                                 const ParseOptions &opts = {})
+void writeGraphToEdgelistParquet(const BuiltGraph<K, O> &bg, const std::string &output_path,
+                                 const EdgelistParquetWrite &spec, size_t num_threads)
 {
+    const DiGraphCsr<K, O> &g = bg.g;
     const size_t n = g.span();
-    const bool directed = opts.directed;
-    const int T = opts.num_threads > 1 ? static_cast<int>(opts.num_threads) : 1;
+    const bool every_arc = emitsEveryArc(bg, spec);
+    const int T = num_threads > 1 ? static_cast<int>(num_threads) : 1;
 
-    // Directed emits every arc, so the CSR offsets already are the row mapping.
+    // Emitting every arc means the CSR offsets already are the row mapping.
     std::vector<O> row_off;
     const O *off = g.offsets.data();
-    if (!directed)
+    if (!every_arc)
     {
         row_off.resize(n + 1);
         std::vector<O> cnt(n);
@@ -336,7 +350,7 @@ void writeGraphToEdgelistParquet(const DiGraphCsr<K, O> &g, const std::string &o
         {
             int64_t pos = static_cast<int64_t>(off[u]) - begin;
             g.forEachEdgeKey((K)u, [&](K v) {
-                if (!directed && v <= (K)u)
+                if (!every_arc && v <= (K)u)
                     return;
                 if (pos >= 0 && pos < len)
                 {
@@ -349,34 +363,32 @@ void writeGraphToEdgelistParquet(const DiGraphCsr<K, O> &g, const std::string &o
     };
 
     const std::string path = output_path + ".parquet";
-    const std::vector<std::string> names{opts.source_col, opts.target_col};
-    if (opts.use_u64_indices || sizeof(K) == 8)
+    const std::vector<std::string> names{spec.source_col, spec.target_col};
+    if (spec.u64_ids || sizeof(K) == 8)
         writeParquetIdColumns<uint64_t>(path, names, total_rows, fill);
     else
         writeParquetIdColumns<uint32_t>(path, names, total_rows, fill);
 }
 
-// Dispatch a CSR to the writer for the requested output format.
+// Dispatch a graph to the writer named by its write spec.
 
 template <class K, class O>
-void writeGraph(const DiGraphCsr<K, O> &g, const std::string &output_path, EdgesFormat fmt,
-                const ParseOptions &opts = {})
+void writeGraph(const BuiltGraph<K, O> &bg, const std::string &output_path, const GraphSpec &spec,
+                size_t num_threads)
 {
-    switch (fmt)
-    {
-    case METIS:
-        writeGraphToMetis(g, output_path, opts);
-        return;
-    case CSR_PARQUET:
-        writeGraphToParquet(g, output_path, opts);
-        return;
-    case EDGELIST_PARQUET:
-        writeGraphToEdgelistParquet(g, output_path, opts);
-        return;
-    case CSV_EDGELIST:
-        writeGraphToCSV(g, output_path, opts);
-        return;
-    default:
-        throw std::runtime_error("writeGraph: unknown format");
-    }
+    std::visit(
+        [&](auto &&s) {
+            using S = std::decay_t<decltype(s)>;
+            if constexpr (std::is_same_v<S, MetisWrite>)
+                writeGraphToMetis(bg, output_path, s, num_threads);
+            else if constexpr (std::is_same_v<S, CsrParquetWrite>)
+                writeGraphToParquet(bg, output_path, s, num_threads);
+            else if constexpr (std::is_same_v<S, EdgelistParquetWrite>)
+                writeGraphToEdgelistParquet(bg, output_path, s, num_threads);
+            else if constexpr (std::is_same_v<S, CsvEdgelistWrite>)
+                writeGraphToCSV(bg, output_path, s, num_threads);
+            else
+                throw std::logic_error("writeGraph: not a write spec");
+        },
+        spec);
 }

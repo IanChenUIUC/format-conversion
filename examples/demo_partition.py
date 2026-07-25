@@ -2,7 +2,8 @@
 Usage:
     uv run python examples/demo_partition.py
 
-Example template for partitioning graphs given a labeling.
+Template for partitioning a graph given a labeling: one sub-graph and node list per
+label. Every spec lists all of its fields at their defaults; delete what you don't need.
 """
 
 from pathlib import Path
@@ -13,39 +14,56 @@ OUTPUT = Path("output")
 
 
 def main() -> None:
-    # ── Input ──────────────────────────────────────────────────────────
-    input_fmt = fmt.EdgesFormat.CSV_EDGELIST  ## CHANGEME
+    nodes = fmt.NodeDescriptor(
+        INPUT / "dnc_nodes.csv",
+        fmt.Nodelist.Csv(
+            comment_char="#",
+            skip_rows=1,            # the first is reused as the header of the per-label node lists
+            base_index=0,           # subtracted from every raw id
+        ),
+    )
 
-    node_opts = fmt.ParseOptions()
-    node_opts.skip_rows = 1  # header
-    nodes_file = INPUT / "dnc_nodes.csv"
+    # ── Input ────────────────────────────────────────────────────────────
+    # See demo_convert.py for the other three read specs.          ## CHANGEME
+    graph_in = fmt.GraphDescriptor(
+        INPUT / "dnc_edges.csv",
+        fmt.CsvEdgelist.Read(
+            sep=",",
+            comment_char="#",
+            skip_rows=1,
+            base_index=0,
+            keep_self_loops=False,
+            directed=False,
+        ),
+    )
 
-    label_opts = fmt.ParseOptions()
+    # ── Labels ───────────────────────────────────────────────────────────
+    # One label per line, in compact-id order.
     labels_path = INPUT / "dnc.parts.2"
+    label_spec = fmt.Labels.Csv(
+        comment_char="#",
+        skip_rows=0,
+    )
 
-    edge_opts = fmt.ParseOptions()
-    if input_fmt == fmt.EdgesFormat.CSV_EDGELIST:
-        edge_opts.skip_rows = 1  # header
-        edges_file = INPUT / "dnc_edges.csv"
-    if input_fmt == fmt.EdgesFormat.CSR_PARQUET:
-        edges_file = INPUT / "dnc.indices.parquet"
-    if input_fmt == fmt.EdgesFormat.METIS:
-        edges_file = INPUT / "dnc.metis"
+    # ── Output ───────────────────────────────────────────────────────────
+    # Written as <output_dir>/<label>/graph.<ext> plus <label>/nodes.csv.
+    output_dir = OUTPUT / "dnc.parts.2"                            ## CHANGEME
+    output_spec = fmt.CsrParquet.Write(
+        indices_col="indices",
+        indptr_col="indptr",
+        u64_indices=False,
+    )
 
-    # ── Output ───────────────────────────────────────────
-    output_fmt = fmt.EdgesFormat.CSR_PARQUET  ## CHANGEME
-    output_dir = OUTPUT / "dnc.parts.2"
-
-    # ── Partition ──────────────────────
-    graph = fmt.GraphDescriptor(edges_file, input_fmt, edge_opts)
-    nodes = fmt.NodeDescriptor(nodes_file, node_opts)
+    # ── Partition ────────────────────────────────────────────────────────
     fmt.partition(
-        graph,
-        nodes,
-        labels_path=labels_path,
-        label_opts=label_opts,
-        output_dir=output_dir,
-        output_fmt=output_fmt,
+        graph_in,
+        labels_path,
+        output_dir,
+        output_spec,
+        nodes=nodes,
+        label_spec=label_spec,
+        num_threads=1,
+        batch_size=1000,            # sub-graphs materialised at once; caps peak memory
     )
 
 

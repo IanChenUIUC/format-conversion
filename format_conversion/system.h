@@ -64,7 +64,7 @@ struct MmapFile
     MmapFile(const MmapFile &) = delete;
     MmapFile &operator=(const MmapFile &) = delete;
 
-    MmapFile(MmapFile &&o) noexcept : data(o.data), size(o.size), fd(o.fd)
+    MmapFile(MmapFile &&o) noexcept : data(o.data), size(o.size), fd(o.fd), path(std::move(o.path))
     {
         o.data = nullptr;
         o.size = 0;
@@ -76,6 +76,13 @@ struct MmapFile
         return {data, size};
     }
 };
+
+// Whether a path can be opened for reading. Used to fail early on a bad input
+// path, without paying for the mapping.
+inline bool fileReadable(const std::string &path)
+{
+    return access(path.c_str(), R_OK) == 0;
+}
 
 // Uninitialised, 2 MB-aligned buffer advised for transparent huge pages. Used for
 // the large random-access scratch in graph building, where huge pages cut TLB

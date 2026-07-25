@@ -114,7 +114,7 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
     const char *base = nd.mmap.data;
     const char *p = base;
     const char *end = p + nd.mmap.size;
-    const uint64_t bias = nd.opts.base_index;
+    const uint64_t bias = nd.spec.base_index;
 
     auto skipLine = [&] {
         const char *nl = (const char *)memchr(p, '\n', end - p);
@@ -122,7 +122,7 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
     };
 
     // Capture the first skipped line as the header (for writeNodelist).
-    if (nd.opts.skip_rows > 0 && p < end)
+    if (nd.spec.skip_rows > 0 && p < end)
     {
         const char *hl = p;
         skipLine();
@@ -130,7 +130,7 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
         if (row_end > hl && *(row_end - 1) == '\r')
             --row_end;
         nm.header_row.assign(hl, row_end);
-        for (size_t i = 1; i < nd.opts.skip_rows && p < end; ++i)
+        for (size_t i = 1; i < nd.spec.skip_rows && p < end; ++i)
             skipLine();
     }
 
@@ -150,7 +150,7 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
             ++p;
             continue;
         }
-        if (*p == nd.opts.comment_char)
+        if (*p == nd.spec.comment_char)
         {
             skipLine();
             continue;
@@ -219,12 +219,12 @@ template <class K = uint32_t> NodeMap<K> buildNodeMap(const NodeDescriptor &nd)
 // look both endpoints up in the NodeMap, and apply the self-loop rule. Invokes
 // cb(u, v) only for edges that survive. Format-agnostic — every reader funnels
 // through this so the filtering rules cannot drift between formats.
-template <class K, class Fn>
-inline void mapRawEdge(uint64_t bi, uint64_t bj, const NodeMap<K> &nm, const ParseOptions &opts, Fn &&cb)
+template <class K, class Spec, class Fn>
+inline void mapRawEdge(uint64_t bi, uint64_t bj, const NodeMap<K> &nm, const Spec &spec, Fn &&cb)
 {
     static_assert(std::is_integral_v<K> && std::is_unsigned_v<K>, "K (index type) must be an unsigned integer");
 
-    const uint64_t bias = opts.base_index;
+    const uint64_t bias = spec.base_index;
     if (bi < bias || bj < bias)
         return;
     uint64_t nu = bi - bias, nv = bj - bias;
@@ -238,7 +238,7 @@ inline void mapRawEdge(uint64_t bi, uint64_t bj, const NodeMap<K> &nm, const Par
     K v = nm.find(static_cast<K>(nv));
     if (u == NodeMap<K>::INVALID_ID || v == NodeMap<K>::INVALID_ID)
         return;
-    if (!opts.keep_self_loops && u == v)
+    if (!spec.keep_self_loops && u == v)
         return;
     cb(u, v);
 }
@@ -247,16 +247,16 @@ inline void mapRawEdge(uint64_t bi, uint64_t bj, const NodeMap<K> &nm, const Par
 // cb(u, v) for each valid edge (unknown endpoints and, unless keep_self_loops,
 // self-loops are dropped). Throws on a malformed number or an id wider than K.
 template <class K, class Fn>
-inline void forEachValidEdge(std::string_view blk, const NodeMap<K> &nm, const ParseOptions &opts, Fn &&cb)
+inline void forEachValidEdge(std::string_view blk, const NodeMap<K> &nm, const CsvEdgelistRead &spec, Fn &&cb)
 {
     auto fb = [&](int64_t ri, int64_t rj, double) {
-        mapRawEdge<K>(static_cast<uint64_t>(ri), static_cast<uint64_t>(rj), nm, opts, cb);
+        mapRawEdge<K>(static_cast<uint64_t>(ri), static_cast<uint64_t>(rj), nm, spec, cb);
     };
 
     // Dispatch the runtime (sep, comment_char) onto the matching compile-time
     // parser instantiation (validated by the caller, see buildCSRFromCSV).
-    const bool hash = opts.comment_char == '#';
-    switch (opts.sep)
+    const bool hash = spec.comment_char == '#';
+    switch (spec.sep)
     {
     case ',':
         if (hash)
@@ -288,12 +288,12 @@ inline constexpr size_t CSR_BLOCK_BYTES = 1u << 20;
 // stable assignment both passes of the build rely on.
 template <class K, class Fn>
 inline void forEachValidEdgeStripe(std::string_view data, int t, int T, size_t nblocks, const NodeMap<K> &nm,
-                                   const ParseOptions &opts, Fn &&cb)
+                                   const CsvEdgelistRead &spec, Fn &&cb)
 {
     for (size_t b = static_cast<size_t>(t); b < nblocks; b += static_cast<size_t>(T))
     {
         auto blk = readEdgelistFormatBlock(data, b * CSR_BLOCK_BYTES, CSR_BLOCK_BYTES);
-        forEachValidEdge(blk, nm, opts, cb);
+        forEachValidEdge(blk, nm, spec, cb);
     }
 }
 
@@ -304,10 +304,11 @@ inline void forEachValidEdgeStripe(std::string_view data, int t, int T, size_t n
 //
 // Parallelised over num_threads with no atomics on the per-edge path; output
 // adjacency order is unspecified unless sorted later.
-template <class K, class O, class ForEachStripe>
-DiGraphCsr<K, O> buildCSRFromEdgeSource(NodeMap<K> &nm, const ParseOptions &opts, ForEachStripe &&forEachStripe)
+template <class K, class O, class Spec, class ForEachStripe>
+DiGraphCsr<K, O> buildCSRFromEdgeSource(NodeMap<K> &nm, const Spec &spec, size_t num_threads,
+                                        ForEachStripe &&forEachStripe)
 {
-    const int T = opts.num_threads > 1 ? static_cast<int>(opts.num_threads) : 1;
+    const int T = num_threads > 1 ? static_cast<int>(num_threads) : 1;
 
     // Dense mode: N is unknown up front, so discover max(id)+1 first.
     if (nm.isDense() && nm.N == 0)
@@ -334,7 +335,7 @@ DiGraphCsr<K, O> buildCSRFromEdgeSource(NodeMap<K> &nm, const ParseOptions &opts
     // Pass 1: each thread counts degrees into its own row (no shared writes).
     // Undirected symmetrizes (counts both endpoints); directed counts only the
     // out-endpoint. The branch is hoisted out of the per-edge path.
-    if (opts.directed)
+    if (spec.directed)
         parallelStripes(T, [&](int t) {
             O *deg = td + static_cast<size_t>(t) * N;
             forEachStripe(t, T, [&](K u, K) { ++deg[u]; });
@@ -378,7 +379,7 @@ DiGraphCsr<K, O> buildCSRFromEdgeSource(NodeMap<K> &nm, const ParseOptions &opts
     // written exactly once). Undirected writes both arcs; directed only u->v.
     g.edgeKeys.resize(static_cast<size_t>(total));
     adviseHugePages(g.edgeKeys.data(), g.edgeKeys.size() * sizeof(K));
-    if (opts.directed)
+    if (spec.directed)
         parallelStripes(T, [&](int t) {
             O *cur = td + static_cast<size_t>(t) * N;
             forEachStripe(t, T, [&](K u, K v) { g.edgeKeys[cur[u]++] = v; });
@@ -398,23 +399,24 @@ DiGraphCsr<K, O> buildCSRFromEdgeSource(NodeMap<K> &nm, const ParseOptions &opts
 // Build a CSR from a CSV edge list. Throws (catchably) on malformed input or
 // out-of-range ids.
 template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const ParseOptions &opts)
+DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const CsvEdgelistRead &spec,
+                                 size_t num_threads)
 {
-    if (opts.comment_char != '#' && opts.comment_char != '%')
+    if (spec.comment_char != '#' && spec.comment_char != '%')
         throw std::runtime_error("comment_char must be '#' or '%'");
-    if (opts.sep != ',' && opts.sep != '\t' && opts.sep != ' ')
+    if (spec.sep != ',' && spec.sep != '\t' && spec.sep != ' ')
         throw std::runtime_error("sep must be ',', '\\t', or ' '");
 
     const size_t nblocks = (data.size() + CSR_BLOCK_BYTES - 1) / CSR_BLOCK_BYTES;
-    return buildCSRFromEdgeSource<K, O>(nm, opts, [&](int t, int T, auto &&cb) {
-        forEachValidEdgeStripe(data, t, T, nblocks, nm, opts, cb);
+    return buildCSRFromEdgeSource<K, O>(nm, spec, num_threads, [&](int t, int T, auto &&cb) {
+        forEachValidEdgeStripe(data, t, T, nblocks, nm, spec, cb);
     });
 }
 
 // Build a CSR from a METIS adjacency-list file (single pass; the "N M" header
 // gives both counts up front). Neighbor ids are 1-indexed in the file.
 template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const ParseOptions &opts)
+DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const MetisRead &spec)
 {
     const char *p = data.data();
     const char *end = p + data.size();
@@ -426,7 +428,7 @@ DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const ParseOptions &
             ++p;
     };
 
-    auto isCommentStart = [&](const char *q) { return *q == '%' || *q == opts.comment_char; };
+    auto isCommentStart = [&](const char *q) { return *q == '%' || *q == spec.comment_char; };
 
     while (p < end && isCommentStart(p))
         skipLine();
@@ -588,18 +590,19 @@ inline bool maxIdFromStatistics(const parquet::FileMetaData &md, int ci_src, int
     return true;
 }
 
-// Build a CSR from a Parquet edge list (two id columns, named by opts.source_col /
-// opts.target_col; any other columns are never decoded).
+// Build a CSR from a Parquet edge list (two id columns, named by spec.source_col /
+// spec.target_col; any other columns are never decoded).
 //
 // The file is decoded twice — once to count degrees, once to scatter — rather than
 // buffered, which keeps resident memory at one row group per thread instead of the
 // whole edge list. See DESIGN.md.
 template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildCSRFromEdgelistParquet(const std::string &path, NodeMap<K> &nm, const ParseOptions &opts)
+DiGraphCsr<K, O> buildCSRFromEdgelistParquet(const std::string &path, NodeMap<K> &nm,
+                                             const EdgelistParquetRead &spec, size_t num_threads)
 {
     auto md = parquet::ParquetFileReader::OpenFile(path, false)->metadata();
-    const int ci_src = parquetColumnIndex(md->schema(), opts.source_col, path);
-    const int ci_dst = parquetColumnIndex(md->schema(), opts.target_col, path);
+    const int ci_src = parquetColumnIndex(md->schema(), spec.source_col, path);
+    const int ci_dst = parquetColumnIndex(md->schema(), spec.target_col, path);
     const int nrg = md->num_row_groups();
     const std::vector<int> cols{ci_src, ci_dst};
 
@@ -610,13 +613,13 @@ DiGraphCsr<K, O> buildCSRFromEdgelistParquet(const std::string &path, NodeMap<K>
     // the self-loop rule or by a base_index underflow, so the footer is
     // authoritative exactly when neither can happen. Otherwise N is left unset and
     // the build below discovers it by scanning, matching the CSV path.
-    const bool stats_agree_with_scan = opts.keep_self_loops && opts.base_index == 0;
+    const bool stats_agree_with_scan = spec.keep_self_loops && spec.base_index == 0;
     if (nm.isDense() && nm.N == 0 && stats_agree_with_scan)
     {
         uint64_t raw_max = 0;
-        if (maxIdFromStatistics(*md, ci_src, ci_dst, raw_max) && raw_max >= opts.base_index)
+        if (maxIdFromStatistics(*md, ci_src, ci_dst, raw_max) && raw_max >= spec.base_index)
         {
-            uint64_t n = raw_max - opts.base_index + 1;
+            uint64_t n = raw_max - spec.base_index + 1;
             if constexpr (sizeof(K) < sizeof(uint64_t))
             {
                 if (n > std::numeric_limits<K>::max())
@@ -627,7 +630,7 @@ DiGraphCsr<K, O> buildCSRFromEdgelistParquet(const std::string &path, NodeMap<K>
         }
     }
 
-    return buildCSRFromEdgeSource<K, O>(nm, opts, [&](int t, int T, auto &&cb) {
+    return buildCSRFromEdgeSource<K, O>(nm, spec, num_threads, [&](int t, int T, auto &&cb) {
         // One reader per thread: concurrent ReadRowGroup on a shared reader is not
         // documented as safe.
         auto infile = arrow::io::ReadableFile::Open(path).ValueOrDie();
@@ -642,7 +645,7 @@ DiGraphCsr<K, O> buildCSRFromEdgelistParquet(const std::string &path, NodeMap<K>
             readIdColumn(*table->column(1), dst);
             const size_t n = std::min(src.size(), dst.size());
             for (size_t i = 0; i < n; ++i)
-                mapRawEdge<K>(src[i], dst[i], nm, opts, cb);
+                mapRawEdge<K>(src[i], dst[i], nm, spec, cb);
         }
     });
 }
@@ -665,71 +668,72 @@ template <class K, class O> void sortNeighbors(DiGraphCsr<K, O> &g, int num_thre
 
 // Build a CSR from an input graph, optionally remapping ids through a node list
 // (nd == nullptr selects dense mode). nm is populated for downstream use.
+//
+// Only the text formats are memory-mapped, and only for the duration of the build:
+// the CSR is materialised before the mapping is dropped, and the Parquet readers
+// open the file through Arrow instead.
 template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd, NodeMap<K> &nm)
+BuiltGraph<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd, NodeMap<K> &nm, size_t num_threads)
 {
-    // use_u64_indices is an output-only option (it controls the CSR_PARQUET
-    // indices column width). Setting it on read/input options is a mistake; it
-    // belongs on convert()'s output_opts.
-    if (gd.opts.use_u64_indices)
-        throw std::runtime_error("use_u64_indices is an output-only option; set it on the output_opts "
-                                 "of convert(), not on read/input options");
+    if (!isReadSpec(gd.spec))
+        throw std::runtime_error("expected a read spec, got " + specName(gd.spec));
 
-    switch (gd.fmt)
-    {
-    case CSV_EDGELIST: {
-        std::string_view data = gd.mmap.view();
-        for (size_t i = 0; i < gd.opts.skip_rows && !data.empty(); ++i)
-        {
-            auto nl = data.find('\n');
-            data = (nl != std::string_view::npos) ? data.substr(nl + 1) : std::string_view{};
-        }
-        nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
-        return buildCSRFromCSV<K, O>(data, nm, gd.opts);
-    }
+    BuiltGraph<K, O> out;
+    out.symmetric = readSymmetric(gd.spec);
 
-    case METIS:
-        return buildGraphFromMETIS<K, O>(gd.mmap.view(), gd.opts);
+    std::visit(
+        [&](auto &&spec) {
+            using S = std::decay_t<decltype(spec)>;
+            if constexpr (std::is_same_v<S, CsvEdgelistRead>)
+            {
+                MmapFile mf(gd.path);
+                std::string_view data = mf.view();
+                for (size_t i = 0; i < spec.skip_rows && !data.empty(); ++i)
+                {
+                    auto nl = data.find('\n');
+                    data = (nl != std::string_view::npos) ? data.substr(nl + 1) : std::string_view{};
+                }
+                nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
+                out.g = buildCSRFromCSV<K, O>(data, nm, spec, num_threads);
+            }
+            else if constexpr (std::is_same_v<S, MetisRead>)
+            {
+                MmapFile mf(gd.path);
+                out.g = buildGraphFromMETIS<K, O>(mf.view(), spec);
+            }
+            else if constexpr (std::is_same_v<S, EdgelistParquetRead>)
+            {
+                nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
+                out.g = buildCSRFromEdgelistParquet<K, O>(gd.path, nm, spec, num_threads);
+            }
+            else if constexpr (std::is_same_v<S, CsrParquetRead>)
+            {
+                const std::string suffix = ".indices.parquet";
+                if (!gd.path.ends_with(suffix))
+                    throw std::runtime_error("CsrParquet.Read path must end with .indices.parquet");
+                std::string base = gd.path.substr(0, gd.path.size() - suffix.size());
 
-    case EDGELIST_PARQUET: {
-        // Text-parsing options cannot apply to a columnar input; silently ignoring
-        // them would let a stale skip_rows look like it was honoured.
-        const ParseOptions defaults;
-        if (gd.opts.sep != defaults.sep || gd.opts.comment_char != defaults.comment_char || gd.opts.skip_rows != 0)
-            throw std::runtime_error("sep, comment_char and skip_rows do not apply to EDGELIST_PARQUET input; "
-                                     "leave them at their defaults");
-        nm = nd ? buildNodeMap<K>(*nd) : NodeMap<K>(K{});
-        return buildCSRFromEdgelistParquet<K, O>(gd.mmap.path, nm, gd.opts);
-    }
+                out.g.edgeKeys = readParquetColumn<K>(base + ".indices.parquet", spec.indices_col);
+                out.g.offsets = readParquetColumn<O>(base + ".indptr.parquet", spec.indptr_col);
+            }
+            else
+                throw std::logic_error("buildGraph: not a read spec");
+        },
+        gd.spec);
 
-    case CSR_PARQUET: {
-        const std::string suffix = ".indices.parquet";
-        const std::string &full = gd.mmap.path;
-        if (!full.ends_with(suffix))
-            throw std::runtime_error("CSR_PARQUET path must end with .indices.parquet");
-        std::string base = full.substr(0, full.size() - suffix.size());
-
-        DiGraphCsr<K, O> g;
-        g.edgeKeys = readParquetColumn<K>(base + ".indices.parquet", "indices");
-        g.offsets = readParquetColumn<O>(base + ".indptr.parquet", "indptr");
-        return g;
-    }
-
-    default:
-        throw std::runtime_error("buildGraph: unknown format");
-    }
+    return out;
 }
 
 template <class K = uint32_t, class O = uint64_t>
-DiGraphCsr<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd)
+BuiltGraph<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd, size_t num_threads)
 {
     NodeMap<K> nm;
-    return buildGraph<K, O>(gd, nd, nm);
+    return buildGraph<K, O>(gd, nd, nm, num_threads);
 }
 
 // Read a label file (one label per line) into a vector indexed by compact id.
 template <class L = int32_t>
-std::vector<L> buildLabelMap(const std::string &labels_path, size_t N, const ParseOptions &opts)
+std::vector<L> buildLabelMap(const std::string &labels_path, size_t N, const LabelsCsv &spec)
 {
     static_assert(std::is_arithmetic_v<L>, "label type must be arithmetic; string labels not yet supported");
 
@@ -737,7 +741,7 @@ std::vector<L> buildLabelMap(const std::string &labels_path, size_t N, const Par
     const char *p = mf.data ? mf.data : nullptr;
     const char *end = p ? p + mf.size : nullptr;
 
-    for (size_t i = 0; i < opts.skip_rows && p < end; ++i)
+    for (size_t i = 0; i < spec.skip_rows && p < end; ++i)
     {
         const char *nl = (const char *)memchr(p, '\n', end - p);
         p = nl ? nl + 1 : end;
@@ -757,7 +761,7 @@ std::vector<L> buildLabelMap(const std::string &labels_path, size_t N, const Par
             ++p;
             continue;
         }
-        if (*p == opts.comment_char)
+        if (*p == spec.comment_char)
         {
             const char *nl = (const char *)memchr(p, '\n', end - p);
             p = nl ? nl + 1 : end;

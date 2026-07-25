@@ -139,4 +139,4 @@ random-access `edgeKeys` array).
 - icebug emits uint64 CSR indices, so `config.toml` sets
   `use_u64_indices_for_csr = true` for `format_conv` in that comparison to keep
   `out_bytes` an apples-to-apples comparison (this is what the Track 9a
-  `use_u64_indices` option was added for).
+  `CsrParquet.Write(u64_indices=...)` option was added for).

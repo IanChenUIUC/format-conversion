@@ -21,9 +21,8 @@ spec is a dict with keys:
 
 from __future__ import annotations
 
+import format_conversion.format as fmt
 from format_conversion.format import (
-    EdgesFormat,
-    ParseOptions,
     NodeDescriptor,
     GraphDescriptor,
     convert as _convert,
@@ -31,36 +30,30 @@ from format_conversion.format import (
 
 import correctness
 
-_SRC_FMT = {"csv": EdgesFormat.CSV_EDGELIST, "metis": EdgesFormat.METIS}
-_DST_FMT = {
-    "metis": EdgesFormat.METIS,
-    "csv": EdgesFormat.CSV_EDGELIST,
-    "csr": EdgesFormat.CSR_PARQUET,
-}
 
-
-def _opts(spec: dict) -> ParseOptions:
-    """Read/input options."""
-    o = ParseOptions()
-    o.num_threads = int(spec["threads"])
-    o.sep = spec.get("sep", ",")
+def _read_spec(spec: dict):
+    """Read spec for the source format."""
     if spec["src_format"] == "csv":
-        o.skip_rows = int(spec.get("skip_rows", 0))
-    return o
+        return fmt.CsvEdgelist.Read(
+            sep=spec.get("sep", ","), skip_rows=int(spec.get("skip_rows", 0))
+        )
+    if spec["src_format"] == "metis":
+        return fmt.Metis.Read()
+    raise ValueError(spec["src_format"])
 
 
-def _output_opts(spec: dict) -> "ParseOptions | None":
-    """Write/output options, or None to reuse the input opts. use_u64_indices is
-    output-only (setting it on read opts is an error), so it lives here."""
-    if spec["dst_format"] == "csr" and spec.get("flags", {}).get(
-        "use_u64_indices_for_csr", False
-    ):
-        oo = ParseOptions()
-        oo.num_threads = int(spec["threads"])
-        oo.sep = spec.get("sep", ",")
-        oo.use_u64_indices = True
-        return oo
-    return None
+def _write_spec(spec: dict):
+    """Write spec for the destination format. u64 indices are a per-run flag."""
+    dst = spec["dst_format"]
+    if dst == "metis":
+        return fmt.Metis.Write()
+    if dst == "csv":
+        return fmt.CsvEdgelist.Write(sep=spec.get("sep", ","))
+    if dst == "csr":
+        return fmt.CsrParquet.Write(
+            u64_indices=bool(spec.get("flags", {}).get("use_u64_indices_for_csr", False))
+        )
+    raise ValueError(dst)
 
 
 def _out_paths(out_prefix: str, dst_format: str) -> list[str]:
@@ -74,13 +67,16 @@ def _out_paths(out_prefix: str, dst_format: str) -> list[str]:
 
 
 def convert(spec: dict) -> dict:
-    o = _opts(spec)
-    gd = GraphDescriptor(str(spec["src_path"]), _SRC_FMT[spec["src_format"]], o)
+    gd = GraphDescriptor(str(spec["src_path"]), _read_spec(spec))
+    out = GraphDescriptor(str(spec["out_prefix"]), _write_spec(spec))
     # A node list applies only when reading CSV (it remaps raw ids → compact ids).
     nd = None
     if spec["src_format"] == "csv" and spec.get("nodes_path"):
-        nd = NodeDescriptor(str(spec["nodes_path"]), o)
-    _convert(gd, nd, spec["out_prefix"], _DST_FMT[spec["dst_format"]], _output_opts(spec))
+        nd = NodeDescriptor(
+            str(spec["nodes_path"]),
+            fmt.Nodelist.Csv(skip_rows=int(spec.get("skip_rows", 0))),
+        )
+    _convert(gd, out, nodes=nd, num_threads=int(spec["threads"]))
     return {"out_paths": _out_paths(spec["out_prefix"], spec["dst_format"]),
             "out_format": spec["dst_format"]}
 
@@ -93,13 +89,15 @@ def reference_degseq(spec: dict, work_prefix: str) -> tuple[str, int, int]:
     Returns the relabeling-invariant degree-sequence hash, node count, and
     undirected edge count.
     """
-    o = ParseOptions()
-    o.num_threads = int(spec["threads"])
-    o.sep = spec.get("csv_sep", spec.get("sep", ","))
-    o.skip_rows = int(spec.get("csv_skip_rows", 0))
-    gd = GraphDescriptor(str(spec["csv_path"]), EdgesFormat.CSV_EDGELIST, o)
-    nd = NodeDescriptor(str(spec["nodes_path"]), o) if spec.get("nodes_path") else None
-    _convert(gd, nd, work_prefix, EdgesFormat.CSR_PARQUET)
+    skip = int(spec.get("csv_skip_rows", 0))
+    gd = GraphDescriptor(
+        str(spec["csv_path"]),
+        fmt.CsvEdgelist.Read(sep=spec.get("csv_sep", spec.get("sep", ",")), skip_rows=skip),
+    )
+    nd = (NodeDescriptor(str(spec["nodes_path"]), fmt.Nodelist.Csv(skip_rows=skip))
+          if spec.get("nodes_path") else None)
+    _convert(gd, GraphDescriptor(str(work_prefix), fmt.CsrParquet.Write()),
+             nodes=nd, num_threads=int(spec["threads"]))
 
     indptr = correctness.read_indptr_parquet(work_prefix + ".indptr.parquet")
     degs = correctness.degseq_from_csr(indptr)

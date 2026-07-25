@@ -1,94 +1,137 @@
 from __future__ import annotations
+import collections.abc
 import os
 import typing
-__all__: list[str] = ['CSR_PARQUET', 'CSV_EDGELIST', 'EDGELIST_PARQUET', 'EdgesFormat', 'GraphDescriptor', 'METIS', 'NodeDescriptor', 'ParseOptions', 'convert', 'partition']
-class EdgesFormat:
-    """
-    Members:
 
-      CSV_EDGELIST
+__all__: list[str] = ['CsrParquet', 'CsvEdgelist', 'EdgelistParquet', 'GraphDescriptor', 'Labels', 'Metis', 'NodeDescriptor', 'Nodelist', 'convert', 'partition']
 
-      METIS
+class CsvEdgelist:
+    class Read:
+        sep: str
+        comment_char: str
+        keep_self_loops: bool
+        directed: bool
+        def __init__(self, *, sep: str = ',', comment_char: str = '#', skip_rows: typing.SupportsInt = 0, base_index: typing.SupportsInt = 0, keep_self_loops: bool = False, directed: bool = False) -> None:
+            ...
+        @property
+        def skip_rows(self) -> int:
+            ...
+        @skip_rows.setter
+        def skip_rows(self, arg0: typing.SupportsInt) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
+            ...
+    class Write:
+        sep: str
+        expand_symmetric: bool
+        def __init__(self, *, sep: str = ',', expand_symmetric: bool = False) -> None:
+            ...
 
-      CSR_PARQUET
+class Metis:
+    class Read:
+        comment_char: str
+        def __init__(self, *, comment_char: str = '#') -> None:
+            ...
+    class Write:
+        def __init__(self) -> None:
+            ...
 
-      EDGELIST_PARQUET
-    """
-    CSR_PARQUET: typing.ClassVar[EdgesFormat]  # value = <EdgesFormat.CSR_PARQUET: 2>
-    CSV_EDGELIST: typing.ClassVar[EdgesFormat]  # value = <EdgesFormat.CSV_EDGELIST: 0>
-    EDGELIST_PARQUET: typing.ClassVar[EdgesFormat]  # value = <EdgesFormat.EDGELIST_PARQUET: 3>
-    METIS: typing.ClassVar[EdgesFormat]  # value = <EdgesFormat.METIS: 1>
-    __members__: typing.ClassVar[dict[str, EdgesFormat]]  # value = {'CSV_EDGELIST': <EdgesFormat.CSV_EDGELIST: 0>, 'METIS': <EdgesFormat.METIS: 1>, 'CSR_PARQUET': <EdgesFormat.CSR_PARQUET: 2>, 'EDGELIST_PARQUET': <EdgesFormat.EDGELIST_PARQUET: 3>}
-    def __eq__(self, other: typing.Any) -> bool:
-        ...
-    def __getstate__(self) -> int:
-        ...
-    def __hash__(self) -> int:
-        ...
-    def __index__(self) -> int:
-        ...
-    def __init__(self, value: typing.SupportsInt) -> None:
-        ...
-    def __int__(self) -> int:
-        ...
-    def __ne__(self, other: typing.Any) -> bool:
-        ...
-    def __repr__(self) -> str:
-        ...
-    def __setstate__(self, state: typing.SupportsInt) -> None:
-        ...
-    def __str__(self) -> str:
-        ...
-    @property
-    def name(self) -> str:
-        ...
-    @property
-    def value(self) -> int:
-        ...
-class GraphDescriptor:
-    def __init__(self, path: os.PathLike | str | bytes, fmt: EdgesFormat, opts: ParseOptions = ...) -> None:
-        ...
+class CsrParquet:
+    class Read:
+        indices_col: str
+        indptr_col: str
+        symmetric: bool
+        def __init__(self, *, indices_col: str = 'indices', indptr_col: str = 'indptr', symmetric: bool = True) -> None:
+            ...
+    class Write:
+        indices_col: str
+        indptr_col: str
+        u64_indices: bool
+        def __init__(self, *, indices_col: str = 'indices', indptr_col: str = 'indptr', u64_indices: bool = False) -> None:
+            ...
+
+class EdgelistParquet:
+    class Read:
+        source_col: str
+        target_col: str
+        keep_self_loops: bool
+        directed: bool
+        def __init__(self, *, source_col: str = 'source', target_col: str = 'target', base_index: typing.SupportsInt = 0, keep_self_loops: bool = False, directed: bool = False) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
+            ...
+    class Write:
+        source_col: str
+        target_col: str
+        u64_ids: bool
+        expand_symmetric: bool
+        def __init__(self, *, source_col: str = 'source', target_col: str = 'target', u64_ids: bool = False, expand_symmetric: bool = False) -> None:
+            ...
+
+class Nodelist:
+    class Csv:
+        comment_char: str
+        def __init__(self, *, comment_char: str = '#', skip_rows: typing.SupportsInt = 0, base_index: typing.SupportsInt = 0) -> None:
+            ...
+        @property
+        def skip_rows(self) -> int:
+            ...
+        @skip_rows.setter
+        def skip_rows(self, arg0: typing.SupportsInt) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
+            ...
+
+class Labels:
+    class Csv:
+        comment_char: str
+        def __init__(self, *, comment_char: str = '#', skip_rows: typing.SupportsInt = 0) -> None:
+            ...
+        @property
+        def skip_rows(self) -> int:
+            ...
+        @skip_rows.setter
+        def skip_rows(self, arg0: typing.SupportsInt) -> None:
+            ...
+
+# The C++ side holds one flat variant over all eight specs; the read/write split is
+# enforced at the convert()/partition() boundary.
+ReadSpec: typing.TypeAlias = CsvEdgelist.Read | Metis.Read | CsrParquet.Read | EdgelistParquet.Read
+WriteSpec: typing.TypeAlias = CsvEdgelist.Write | Metis.Write | CsrParquet.Write | EdgelistParquet.Write
+GraphSpec: typing.TypeAlias = ReadSpec | WriteSpec
+
 class NodeDescriptor:
-    def __init__(self, path: os.PathLike | str | bytes, opts: ParseOptions = ...) -> None:
+    def __init__(self, path: os.PathLike | str | bytes, spec: Nodelist.Csv = ...) -> None:
         ...
-class ParseOptions:
-    comment_char: str
-    keep_self_loops: bool
-    sep: str
-    sort_neighbors: bool
-    use_u64_indices: bool
-    directed: bool
-    source_col: str
-    target_col: str
-    def __init__(self) -> None:
+
+class GraphDescriptor:
+    def __init__(self, path: os.PathLike | str | bytes, spec: GraphSpec) -> None:
         ...
     @property
-    def base_index(self) -> int:
-        ...
-    @base_index.setter
-    def base_index(self, arg0: typing.SupportsInt) -> None:
+    def path(self) -> str:
         ...
     @property
-    def num_threads(self) -> int:
+    def spec(self) -> GraphSpec:
         ...
-    @num_threads.setter
-    def num_threads(self, arg0: typing.SupportsInt) -> None:
-        ...
-    @property
-    def skip_rows(self) -> int:
-        ...
-    @skip_rows.setter
-    def skip_rows(self, arg0: typing.SupportsInt) -> None:
-        ...
+
 @typing.overload
-def convert(input: GraphDescriptor, nodes: NodeDescriptor | None = None, output_path: os.PathLike | str | bytes, output_fmt: EdgesFormat, output_opts: ParseOptions | None = None) -> None:
+def convert(input: GraphDescriptor, output: GraphDescriptor, *, nodes: NodeDescriptor | None = None, num_threads: typing.SupportsInt = 1, sort_neighbors: bool = False) -> None:
     ...
 @typing.overload
-def convert(input: GraphDescriptor, nodes: NodeDescriptor, outputs: typing.Sequence[tuple[os.PathLike | str | bytes, EdgesFormat] | tuple[os.PathLike | str | bytes, EdgesFormat, ParseOptions | None]]) -> None:
+def convert(input: GraphDescriptor, outputs: collections.abc.Sequence[GraphDescriptor], *, nodes: NodeDescriptor | None = None, num_threads: typing.SupportsInt = 1, sort_neighbors: bool = False) -> None:
     ...
-def partition(input: GraphDescriptor, nodes: NodeDescriptor | None = None, labels_path: os.PathLike | str | bytes, output_dir: os.PathLike | str | bytes, output_fmt: EdgesFormat, label_opts: ParseOptions = ..., batch_size: typing.SupportsInt = 18446744073709551615) -> None:
+
+def partition(input: GraphDescriptor, labels_path: os.PathLike | str | bytes, output_dir: os.PathLike | str | bytes, output_spec: GraphSpec, *, nodes: NodeDescriptor | None = None, label_spec: Labels.Csv = ..., num_threads: typing.SupportsInt = 1, sort_neighbors: bool = False, batch_size: typing.SupportsInt = 18446744073709551615) -> None:
     ...
-CSR_PARQUET: EdgesFormat  # value = <EdgesFormat.CSR_PARQUET: 2>
-CSV_EDGELIST: EdgesFormat  # value = <EdgesFormat.CSV_EDGELIST: 0>
-EDGELIST_PARQUET: EdgesFormat  # value = <EdgesFormat.EDGELIST_PARQUET: 3>
-METIS: EdgesFormat  # value = <EdgesFormat.METIS: 1>

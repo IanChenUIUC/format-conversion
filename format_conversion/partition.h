@@ -123,17 +123,29 @@ robin_hood::unordered_flat_map<L, DiGraphCsr<K, O>> extractSubgraphs(
 // memory scales with it. See DESIGN.md.
 
 template <class K = uint32_t, class O = uint64_t, class L = int32_t>
-void partition_graph(const GraphDescriptor &input, const NodeDescriptor *nodes, const std::string &labels_path,
-                     const ParseOptions &label_opts, const std::string &output_dir, EdgesFormat output_fmt,
+void partition_graph(const GraphDescriptor &input, const std::string &labels_path, const std::string &output_dir,
+                     const GraphSpec &output_spec, const NodeDescriptor *nodes, const LabelsCsv &label_spec,
+                     size_t num_threads, bool sort_neighbors,
                      size_t batch_size = std::numeric_limits<size_t>::max())
 {
+    requireSide(input, true, "partition");
+    if (isReadSpec(output_spec))
+        throw std::runtime_error("partition: output descriptor carries a read spec (" + specName(output_spec) +
+                                 "); expected a write spec");
+    if (sort_neighbors)
+        throw NotImplemented("sort_neighbors is not implemented for partition()");
+
     // 1. Build graph + NodeMap.
     NodeMap<K> nm;
-    auto g = buildGraph<K, O>(input, nodes, nm);
+    auto bg = buildGraph<K, O>(input, nodes, nm, num_threads);
+    const DiGraphCsr<K, O> &g = bg.g;
+    if (std::holds_alternative<MetisWrite>(output_spec) && !bg.symmetric)
+        throw std::runtime_error("METIS output is undirected-only; the input is read with directed=true "
+                                 "(use CsvEdgelist.Write or CsrParquet.Write for directed graphs)");
     K N = static_cast<K>(g.span());
 
     // 2. Load labels.
-    auto labels = buildLabelMap<L>(labels_path, N, label_opts);
+    auto labels = buildLabelMap<L>(labels_path, N, label_spec);
 
     // 3. Build label_verts[L] = compact ids for label L, in compact-id order.
     robin_hood::unordered_flat_map<L, std::vector<K>> label_verts;
@@ -160,7 +172,10 @@ void partition_graph(const GraphDescriptor &input, const NodeDescriptor *nodes, 
             auto label_dir = std::filesystem::path(output_dir) / std::to_string(label);
             std::filesystem::create_directories(label_dir);
 
-            writeGraph(sub_g, (label_dir / "graph").string(), output_fmt, input.opts);
+            // A sub-CSR is a vertex-induced slice, so it inherits the parent's
+            // arc storage.
+            BuiltGraph<K, O> sub{sub_g, bg.symmetric};
+            writeGraph(sub, (label_dir / "graph").string(), output_spec, num_threads);
             writeNodelist((label_dir / "nodes.csv").string(), label_verts.at(label), nm);
         }
     }

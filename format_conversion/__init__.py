@@ -1,6 +1,10 @@
 from .format import (
-    EdgesFormat,
-    ParseOptions,
+    CsvEdgelist,
+    Metis,
+    CsrParquet,
+    EdgelistParquet,
+    Nodelist,
+    Labels,
     NodeDescriptor,
     GraphDescriptor,
     convert,
@@ -8,8 +12,12 @@ from .format import (
 )
 
 __all__ = [
-    "EdgesFormat",
-    "ParseOptions",
+    "CsvEdgelist",
+    "Metis",
+    "CsrParquet",
+    "EdgelistParquet",
+    "Nodelist",
+    "Labels",
     "NodeDescriptor",
     "GraphDescriptor",
     "convert",

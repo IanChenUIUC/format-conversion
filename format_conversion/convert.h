@@ -3,55 +3,52 @@
 #include "graph_read.h"
 #include "graph_write.h"
 
-#include <optional>
-#include <tuple>
+#include <string>
 #include <vector>
 
-// Convert a graph between formats. Optionally remaps ids through `nodes` and sorts
-// adjacency lists (input.opts.sort_neighbors); both honour input.opts.num_threads.
-//
-// Reading uses input.opts; writing uses output_opts when provided, else input.opts
-// (so the read and write sides can differ — e.g. read comma / write tab, or emit
-// uint64 CSR indices only on output). sort_neighbors is a read-side transform and
-// always comes from input.opts.
-template <class K = uint32_t, class O = uint64_t>
-void convert_graph(const GraphDescriptor &input, const NodeDescriptor *nodes, const std::string &output_path,
-                   EdgesFormat output_fmt, const ParseOptions *output_opts = nullptr)
+// METIS cannot represent a graph stored as arcs only. Whether the build produces
+// one is a property of the read spec, so every target can be checked before any
+// file is written.
+inline void requireMetisTargetsSymmetric(const GraphDescriptor &input, const GraphSpec &out_spec)
 {
-    DiGraphCsr<K, O> g = buildGraph<K, O>(input, nodes);
-    if (input.opts.sort_neighbors)
-        sortNeighbors(g, static_cast<int>(input.opts.num_threads));
-    const ParseOptions &out = output_opts ? *output_opts : input.opts;
-    writeGraph(g, output_path, output_fmt, out);
+    if (std::holds_alternative<MetisWrite>(out_spec) && !readSymmetric(input.spec))
+        throw std::runtime_error("METIS output is undirected-only; the input is read with directed=true "
+                                 "(use CsvEdgelist.Write or CsrParquet.Write for directed graphs)");
 }
 
-// One output target for convert_graph_multi: (path, format, per-output options).
-// A nullopt options field inherits input.opts (same rule as convert_graph).
-using OutputSpec = std::tuple<std::string, EdgesFormat, std::optional<ParseOptions>>;
-
-// Read/build a graph ONCE and write it to several outputs, each with its own
-// format and (optional) options. Avoids re-parsing the input per output.
+// Convert a graph between formats. Optionally remaps ids through `nodes` and sorts
+// adjacency lists; both honour num_threads.
 template <class K = uint32_t, class O = uint64_t>
-void convert_graph(const GraphDescriptor &input, const NodeDescriptor *nodes, const std::vector<OutputSpec> &outputs)
+void convert_graph(const GraphDescriptor &input, const GraphDescriptor &output, const NodeDescriptor *nodes,
+                   size_t num_threads, bool sort_neighbors)
 {
-    // Pre-validate every output before touching the filesystem.
-    for (const auto &spec : outputs)
+    requireSide(input, true, "convert");
+    requireSide(output, false, "convert");
+    requireMetisTargetsSymmetric(input, output.spec);
+
+    BuiltGraph<K, O> bg = buildGraph<K, O>(input, nodes, num_threads);
+    if (sort_neighbors)
+        sortNeighbors(bg.g, static_cast<int>(num_threads));
+    writeGraph(bg, output.path, output.spec, num_threads);
+}
+
+// Read/build a graph ONCE and write it to several outputs. Every target is
+// validated before the first byte is written, so a bad one is all-or-nothing.
+template <class K = uint32_t, class O = uint64_t>
+void convert_graph(const GraphDescriptor &input, const std::vector<GraphDescriptor> &outputs,
+                   const NodeDescriptor *nodes, size_t num_threads, bool sort_neighbors)
+{
+    requireSide(input, true, "convert");
+    for (const auto &out : outputs)
     {
-        const auto &oo = std::get<2>(spec);
-        const ParseOptions &out = oo ? *oo : input.opts;
-        if (std::get<1>(spec) == METIS && out.directed)
-            throw std::runtime_error("METIS output is undirected-only; directed=true is not supported for METIS "
-                                     "(use CSV_EDGELIST or CSR_PARQUET for directed graphs)");
+        requireSide(out, false, "convert");
+        requireMetisTargetsSymmetric(input, out.spec);
     }
 
-    DiGraphCsr<K, O> g = buildGraph<K, O>(input, nodes);
-    if (input.opts.sort_neighbors)
-        sortNeighbors(g, static_cast<int>(input.opts.num_threads));
+    BuiltGraph<K, O> bg = buildGraph<K, O>(input, nodes, num_threads);
+    if (sort_neighbors)
+        sortNeighbors(bg.g, static_cast<int>(num_threads));
 
-    for (const auto &spec : outputs)
-    {
-        const auto &oo = std::get<2>(spec);
-        const ParseOptions &out = oo ? *oo : input.opts;
-        writeGraph(g, std::get<0>(spec), std::get<1>(spec), out);
-    }
+    for (const auto &out : outputs)
+        writeGraph(bg, out.path, out.spec, num_threads);
 }

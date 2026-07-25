@@ -8,7 +8,7 @@ kept to interface/usage level; the reasoning lives here.
 | File | Responsibility |
 |------|----------------|
 | `system.h` | OS/parallel primitives: `MmapFile`, `HugeArray`, `adviseHugePages`, `parallelStripes`. No graph knowledge. |
-| `formats.h` | Core types: `EdgesFormat`, `ParseOptions`, `NodeDescriptor`, `GraphDescriptor`. |
+| `formats.h` | Core types: the ten format specs, the `GraphSpec` variant, `NodeDescriptor`, `GraphDescriptor`, `BuiltGraph`. |
 | `graph_read.h` | Read paths → in-memory CSR (`DiGraphCsr`): node-id remapping, the format-agnostic CSR build, METIS/Parquet readers, `sortNeighbors`. |
 | `graph_write.h` | Write paths from CSR: METIS, CSV, Parquet. |
 | `convert.h` / `partition.h` | User-facing pipelines. |
@@ -16,8 +16,76 @@ kept to interface/usage level; the reasoning lives here.
 
 The in-memory representation throughout is puzzlef's `DiGraphCsr<K=uint32_t,
 O=uint64_t>` — CSR with `offsets` (`O`) and `edgeKeys` (`K`). By default the
-build stores a symmetric CSR (both directions of each edge); with
-`ParseOptions::directed` it stores only the out-arcs `u→v`.
+build stores a symmetric CSR (both directions of each edge); with a read spec's
+`directed` it stores only the out-arcs `u→v`.
+
+## One options type per format per direction
+
+`ParseOptions` used to be a single struct of 11 fields serving four readers, four
+writers, the node list and the label list. No path used more than seven of them,
+and the rest were mostly *silently ignored*: METIS and CSR-Parquet reads dropped
+`base_index`, `keep_self_loops`, `directed` and `num_threads` on the floor, while
+three other combinations had to be rejected at runtime. A field that a code path
+never reads is a place for a wrong value to sit unnoticed.
+
+Now the format tag *is* the options type, split by side: `CsvEdgelistRead`,
+`CsvEdgelistWrite`, and so on. Each carries exactly the fields its path consults,
+which deleted three runtime validations outright — `use_u64_indices` on a read
+spec, text options on a Parquet input, and `directed` on METIS output are all
+unrepresentable rather than rejected.
+
+Two consequences worth naming:
+
+- **No shared base struct.** `base_index` / `keep_self_loops` / `directed` are
+  declared in both edge-read structs rather than inherited from a common base.
+  Only two of the ten specs share them, and duplicating three fields keeps the
+  pybind11 keyword constructors flat; `mapRawEdge` and `buildCSRFromEdgeSource`
+  became templates on the spec type instead of taking a base reference.
+- **One flat variant, not a variant of variants.** `GraphSpec` lists all eight
+  graph specs; the read/write distinction is a `.index()` comparison enforced at
+  the `convert` / `partition` boundary. Nesting `variant<ReadSpec, WriteSpec>`
+  would encode the split in the type, but pybind11 resolves a flat alternative
+  list predictably and produces a readable union in the generated stubs.
+
+`num_threads` and `sort_neighbors` are not parse options at all — the first is
+used by the build, the sort and three of the four writers, and the second is a
+post-build CSR transform. Both are parameters of `convert` / `partition`.
+
+## Where direction lives (`BuiltGraph`)
+
+Whether a CSR holds both directions of each edge is a property of the *data*, not
+of the options used to write it. `BuiltGraph` pairs the CSR with that one bit, and
+the writers consult it: a symmetric CSR emits one row per edge with `u<v`, a graph
+stored as arcs only emits every arc, and METIS refuses the latter outright.
+
+This closes a hole a write-side `directed` flag could not. Previously, reading with
+`directed=true` and writing with `directed=false` silently dropped every arc with
+`v<u` — on the `dnc` graph, 5236 of 10429. That state is now unrepresentable: the
+only write-side knob is `expand_symmetric`, which adds the reverse arc of each
+undirected edge and is a no-op on a graph that already stores arcs only.
+
+`symmetric` is a pure function of the read spec, so it is known before the build
+and the multi-output pre-validation stays all-or-nothing. Three of the four readers
+determine it themselves; a CSR Parquet file records nothing about direction, so
+`CsrParquetRead::symmetric` is the caller's declaration. Defaulting it to `true`
+would silently reinstate the METIS hole for exactly the round trip most likely to
+hit it, which is why it is a field rather than an assumption.
+
+## What is memory-mapped, and for how long
+
+Only the two text formats are mapped, and only for the duration of `buildGraph`:
+the CSR is fully materialised into `HugeArray`s before the mapping is dropped, and
+nothing retains a pointer into it. The Parquet readers open the file through Arrow
+and never map it at all — previously they mapped it and then ignored the mapping.
+
+`NodeDescriptor` is the exception and still maps at construction, held for the
+object's lifetime: `NodeMap::file_data` points into it and `writeNodelist` reads
+verbatim rows back out long after the build. That is the lifetime rule the
+`shared_ptr` on the Python side exists for.
+
+The visible cost is that a bad input path used to fail when the descriptor was
+constructed. `GraphDescriptor` keeps that early error with an explicit readability
+check for read specs, which is a `stat` rather than a mapping.
 
 ## Edge source → CSR build (`buildCSRFromEdgeSource`)
 
@@ -106,9 +174,9 @@ Three representations, chosen when the node list is scanned:
 
 The compact id is always the row's position in the node list (file order).
 
-`K` (index type) caps node ids at `2^(8·sizeof(K))`. `forEachValidEdge` checks
-this when narrowing a parsed 64-bit id to `K` (compiled out for `K=uint64`) and
-raises rather than silently truncating.
+`K` (index type) caps node ids at `2^(8·sizeof(K))`. `mapRawEdge` checks this when
+narrowing a parsed 64-bit id to `K` (compiled out for `K=uint64`) and raises rather
+than silently truncating.
 
 ## Memory, huge pages, and NUMA
 
@@ -130,7 +198,7 @@ than cache. Two independent concerns:
 Two single-column files (`.indices.parquet`, `.indptr.parquet`). Both columns are
 wrapped zero-copy from the CSR vectors (no cast/copy); indices are written at
 their native `K` width (uint32 by default), not widened to uint64. Requesting
-`use_u64_indices` is the one case that cannot be zero-copy, and it streams rather
+`u64_indices` is the one case that cannot be zero-copy, and it streams rather
 than copying (see below).
 
 These files are the long-term on-disk form, tuned for size:
@@ -139,7 +207,7 @@ These files are the long-term on-disk form, tuned for size:
   are barely narrower than the raw values, so a dictionary is overhead.
 - **Delta (`DELTA_BINARY_PACKED`) + zstd** — `indptr` is monotonic and collapses
   to its gaps (degrees). `indices` benefit from delta's frame-of-reference, and
-  more so when adjacency is sorted (`ParseOptions::sort_neighbors`); on highly
+  more so when adjacency is sorted (`sort_neighbors`); on highly
   skewed (power-law) graphs the hub lists compress well. The gain is degree- and
   distribution-dependent — modest on near-uniform low-degree graphs, larger on
   social-network-style inputs.
@@ -154,7 +222,7 @@ optimised here.
 Zero-copy works only when a column already *is* a contiguous array. Two outputs
 are not:
 
-- `use_u64_indices` with `K = uint32`, where the widened values exist nowhere;
+- `u64_indices` with `K = uint32`, where the widened values exist nowhere;
 - the Parquet edge list, whose `source`/`target` columns are a re-derivation of
   the CSR and are not stored anywhere in that shape.
 

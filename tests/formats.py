@@ -16,7 +16,8 @@ from typing import Callable
 from .helpers import read_metis, read_edgelist, read_csr_parquet, read_edgelist_parquet
 
 try:
-    from format_conversion.format import EdgesFormat, ParseOptions, GraphDescriptor
+    import format_conversion.format as _fmt
+    from format_conversion.format import GraphDescriptor
     _LOADED = True
 except ImportError:
     _LOADED = False
@@ -24,35 +25,38 @@ except ImportError:
 
 @dataclass
 class Format:
-    name:  str
-    _fmt:  object                   # EdgesFormat value; kept as object for pre-import safety
-    _read: Callable[[Path], frozenset]
+    name:       str
+    extension:  str                             # appended by writeGraph/writeGraphToX
+    _read:      Callable[[Path], frozenset]
+    _read_spec: Callable[..., object]           # kwargs -> a *.Read spec
+    _write_spec: Callable[..., object]          # kwargs -> a *.Write spec
 
     # ── Public API used by tests ──────────────────────────────────────────
-
-    @property
-    def fmt(self):
-        return self._fmt
 
     def read(self, base: Path) -> frozenset:
         """Read edges from the output file(s) at base (without extension)."""
         return self._read(base)
 
-    def as_input(self, base: Path, opts: "ParseOptions | None" = None) -> "GraphDescriptor":
+    def read_spec(self, **kw):
+        """A read spec for this format, e.g. CsvEdgelist.Read(**kw)."""
+        return self._read_spec(**kw)
+
+    def write_spec(self, **kw):
+        """A write spec for this format, e.g. CsvEdgelist.Write(**kw)."""
+        return self._write_spec(**kw)
+
+    def as_input(self, base: Path, **kw) -> "GraphDescriptor":
         """GraphDescriptor for reading this format as convert/partition input.
-        Appends the format-specific extension so the path matches what writeGraph wrote."""
+        Appends the format-specific extension so the path matches what was written."""
         if not _LOADED:
             raise ImportError("C++ module not built")
-        o = opts or ParseOptions()
-        # Must match the extensions appended by writeGraph/writeGraphToX
-        extensions = {
-            EdgesFormat.METIS:            ".metis",
-            EdgesFormat.CSV_EDGELIST:     ".csv",
-            EdgesFormat.CSR_PARQUET:      ".indices.parquet",
-            EdgesFormat.EDGELIST_PARQUET: ".parquet",
-        }
-        path = str(base) + extensions.get(self._fmt, "")
-        return GraphDescriptor(path, self._fmt, o)
+        return GraphDescriptor(str(base) + self.extension, self.read_spec(**kw))
+
+    def as_output(self, base: Path, **kw) -> "GraphDescriptor":
+        """GraphDescriptor for writing this format. The path is a prefix."""
+        if not _LOADED:
+            raise ImportError("C++ module not built")
+        return GraphDescriptor(str(base), self.write_spec(**kw))
 
     def __repr__(self) -> str:
         return f"Format({self.name})"
@@ -80,11 +84,14 @@ def _make_formats() -> dict[str, Format]:
     if not _LOADED:
         return {}
     return {
-        "metis":   Format("metis",   EdgesFormat.METIS,        _read_metis),
-        "csv":     Format("csv",     EdgesFormat.CSV_EDGELIST,  _read_csv),
-        "parquet": Format("parquet", EdgesFormat.CSR_PARQUET,   _read_parquet),
-        "edgelist_parquet": Format("edgelist_parquet", EdgesFormat.EDGELIST_PARQUET,
-                                   _read_edgelist_parquet),
+        "metis":   Format("metis", ".metis", _read_metis,
+                          _fmt.Metis.Read, _fmt.Metis.Write),
+        "csv":     Format("csv", ".csv", _read_csv,
+                          _fmt.CsvEdgelist.Read, _fmt.CsvEdgelist.Write),
+        "parquet": Format("parquet", ".indices.parquet", _read_parquet,
+                          _fmt.CsrParquet.Read, _fmt.CsrParquet.Write),
+        "edgelist_parquet": Format("edgelist_parquet", ".parquet", _read_edgelist_parquet,
+                                   _fmt.EdgelistParquet.Read, _fmt.EdgelistParquet.Write),
     }
 
 

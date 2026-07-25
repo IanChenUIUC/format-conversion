@@ -16,11 +16,8 @@ from .formats import FORMATS, Format
 from .helpers import write_edgelist, read_nodelist, read_nodelist_rows, read_nodelist_header
 
 try:
-    from format_conversion.format import (
-        EdgesFormat, ParseOptions,
-        NodeDescriptor, GraphDescriptor,
-        partition,
-    )
+    import format_conversion.format as spec
+    from format_conversion.format import NodeDescriptor, GraphDescriptor, partition
     HAS_MODULE = True
 except ImportError:
     HAS_MODULE = False
@@ -34,11 +31,8 @@ FORMAT_IDS     = list(FORMATS.keys())
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _csv_in(g: dict, **kw) -> GraphDescriptor:
-    opts = ParseOptions()
-    opts.skip_rows = 1  # fixture edge files always have a src,dst header
-    for k, v in kw.items():
-        setattr(opts, k, v)
-    return GraphDescriptor(str(g["edges"]), EdgesFormat.CSV_EDGELIST, opts)
+    kw.setdefault("skip_rows", 1)  # fixture edge files always have a src,dst header
+    return GraphDescriptor(str(g["edges"]), spec.CsvEdgelist.Read(**kw))
 
 def _node(g: dict) -> NodeDescriptor:
     return NodeDescriptor(str(g["nodes"]))
@@ -54,8 +48,8 @@ class TestPartitionCorrectness:
     def test_per_label_edge_count(self, graph, out_fmt: Format, tmp_path):
         """Each label's sub-graph has the expected number of intra-label edges."""
         out = tmp_path / "parts"
-        partition(_csv_in(graph), _node(graph),
-                  graph["labels"], out, out_fmt.fmt)
+        partition(_csv_in(graph), graph["labels"], out, out_fmt.write_spec(),
+                  nodes=_node(graph))
         for label, expected in graph["spec"].intra_local().items():
             result = _read_label(out, label, out_fmt)
             assert len(result) == len(expected), (
@@ -65,16 +59,16 @@ class TestPartitionCorrectness:
     def test_per_label_edge_set(self, graph, out_fmt: Format, tmp_path):
         """Each label's sub-graph contains exactly the correct local-ID edges."""
         out = tmp_path / "parts"
-        partition(_csv_in(graph), _node(graph),
-                  graph["labels"], out, out_fmt.fmt)
+        partition(_csv_in(graph), graph["labels"], out, out_fmt.write_spec(),
+                  nodes=_node(graph))
         for label, expected in graph["spec"].intra_local().items():
             assert _read_label(out, label, out_fmt) == expected
 
     def test_total_edge_count(self, graph, out_fmt: Format, tmp_path):
         """Sum of partition edge counts equals total intra-label edge count."""
         out = tmp_path / "parts"
-        partition(_csv_in(graph), _node(graph),
-                  graph["labels"], out, out_fmt.fmt)
+        partition(_csv_in(graph), graph["labels"], out, out_fmt.write_spec(),
+                  nodes=_node(graph))
         total    = sum(_read_label(out, lab, out_fmt).__len__()
                        for lab in graph["spec"].intra_local())
         expected = sum(len(es) for es in graph["spec"].intra_local().values())
@@ -87,8 +81,8 @@ class TestPartitionCorrectness:
           - all extra columns preserved verbatim (when input has multiple columns)
         """
         out = tmp_path / "parts"
-        partition(_csv_in(graph), _node(graph),
-                  graph["labels"], out, out_fmt.fmt)
+        partition(_csv_in(graph), graph["labels"], out, out_fmt.write_spec(),
+                  nodes=_node(graph))
 
         spec = graph["spec"]
         for label, expected_nodes in spec.label_nodes().items():
@@ -123,8 +117,8 @@ class TestPartitionCorrectness:
     def test_partition_count(self, graph, out_fmt: Format, tmp_path):
         """Output contains exactly one sub-directory per unique label."""
         out = tmp_path / "parts"
-        partition(_csv_in(graph), _node(graph),
-                  graph["labels"], out, out_fmt.fmt)
+        partition(_csv_in(graph), graph["labels"], out, out_fmt.write_spec(),
+                  nodes=_node(graph))
         unique_labels = {str(l) for l in set(graph["spec"].labels)}
         subdirs = {p.name for p in out.iterdir() if p.is_dir()}
         assert subdirs == unique_labels
@@ -140,8 +134,9 @@ def test_batch_size_consistent(graph, batch_size, tmp_path):
     out_bat = tmp_path / f"b{batch_size}"
 
     g, n = _csv_in(graph), _node(graph)
-    partition(g, n, graph["labels"], out_ref, fmt.fmt)
-    partition(g, n, graph["labels"], out_bat, fmt.fmt, batch_size=batch_size)
+    partition(g, graph["labels"], out_ref, fmt.write_spec(), nodes=n)
+    partition(g, graph["labels"], out_bat, fmt.write_spec(), nodes=n,
+              batch_size=batch_size)
 
     for label in graph["spec"].intra_local():
         assert _read_label(out_bat, label, fmt) == _read_label(out_ref, label, fmt), (
@@ -155,11 +150,9 @@ def test_label_skip_rows(graph, tmp_path):
     labels_hdr = tmp_path / "labels_hdr.txt"
     labels_hdr.write_text("label\n" + "\n".join(map(str, graph["spec"].labels)) + "\n")
 
-    opts = ParseOptions()
-    opts.skip_rows = 1
     out = tmp_path / "parts"
-    partition(_csv_in(graph), _node(graph),
-              labels_hdr, out, EdgesFormat.METIS, label_opts=opts)
+    partition(_csv_in(graph), labels_hdr, out, spec.Metis.Write(),
+              nodes=_node(graph), label_spec=spec.Labels.Csv(skip_rows=1))
 
     for label, expected in graph["spec"].intra_local().items():
         assert len(_read_label(out, label, FORMATS["metis"])) == len(expected)
@@ -172,9 +165,59 @@ def test_label_comment_char(graph, tmp_path):
     labels_comments.write_text("\n".join(lines) + "\n")
 
     out = tmp_path / "parts"
-    partition(_csv_in(graph), _node(graph),
-              labels_comments, out, EdgesFormat.METIS)
+    partition(_csv_in(graph), labels_comments, out, spec.Metis.Write(),
+              nodes=_node(graph))
 
     total = sum(_read_label(out, lab, FORMATS["metis"]).__len__()
                 for lab in graph["spec"].intra_local())
     assert total == sum(len(es) for es in graph["spec"].intra_local().values())
+
+
+# ── Output spec is the partition's own, not the input's ───────────────────────
+
+def test_output_spec_is_independent_of_input(tmp_path):
+    """Sub-graphs are written with partition's own write spec; nothing carries
+    over from the read side. Reading comma-separated, writing tab-separated.
+
+    Uses an explicit graph rather than the fixture library: this needs a labelling
+    with at least one intra-label edge, which not every fixture graph has."""
+    edges = tmp_path / "edges.csv"; edges.write_text("0,1\n2,3\n")
+    nodes = tmp_path / "nodes.csv"; nodes.write_text("node_id\n0\n1\n2\n3\n")
+    labels = tmp_path / "labels.txt"; labels.write_text("0\n0\n1\n1\n")
+
+    out = tmp_path / "parts"
+    partition(GraphDescriptor(str(edges), spec.CsvEdgelist.Read(sep=",")),
+              labels, out, spec.CsvEdgelist.Write(sep="\t"),
+              nodes=NodeDescriptor(str(nodes), spec.Nodelist.Csv(skip_rows=1)))
+
+    written = [p for p in out.rglob("graph.csv") if p.stat().st_size > 0]
+    assert len(written) == 2, f"expected both labels non-empty, got {written}"
+    for p in written:
+        assert p.read_text().strip() == "0\t1"
+
+
+def test_sort_neighbors_not_implemented(graph, tmp_path):
+    """sort_neighbors is accepted but not yet honoured, so True raises rather than
+    silently doing nothing. False is the honest description of current behaviour."""
+    out = tmp_path / "parts"
+    with pytest.raises(NotImplementedError):
+        partition(_csv_in(graph), graph["labels"], out, spec.Metis.Write(),
+                  nodes=_node(graph), sort_neighbors=True)
+
+    partition(_csv_in(graph), graph["labels"], tmp_path / "ok", spec.Metis.Write(),
+              nodes=_node(graph), sort_neighbors=False)
+
+
+def test_metis_output_rejects_directed_input(graph, tmp_path):
+    """A graph read as arcs only cannot be written as METIS, in partition as in
+    convert."""
+    with pytest.raises(Exception, match="undirected-only"):
+        partition(_csv_in(graph, directed=True), graph["labels"], tmp_path / "parts",
+                  spec.Metis.Write(), nodes=_node(graph))
+
+
+def test_partition_rejects_read_spec_output(graph, tmp_path):
+    """Passing a read spec as the output spec is rejected, naming it."""
+    with pytest.raises(Exception, match=r"CsvEdgelist\.Read"):
+        partition(_csv_in(graph), graph["labels"], tmp_path / "parts",
+                  spec.CsvEdgelist.Read(), nodes=_node(graph))
