@@ -5,7 +5,7 @@ Compatible with [data-specification](https://github.com/illinois-or-research-ana
 
 ## Dependencies
 
-- pyarrow
+- arrow
 - omp
 
 ## External Libraries
@@ -37,14 +37,14 @@ is no separate format argument. Each spec carries exactly the settings its code
 path reads, so a setting that does not apply to a format is absent rather than
 silently ignored.
 
-| | Read spec | Write spec |
-|---|---|---|
-| CSV edge list     | `CsvEdgelist.Read(sep, comment_char, skip_rows, base_index, keep_self_loops, directed)` | `CsvEdgelist.Write(sep, base_index, expand_symmetric)` |
-| METIS             | `Metis.Read(comment_char, base_index)` | `Metis.Write(base_index)` |
-| CSR Parquet       | `CsrParquet.Read(indices_col, indptr_col, base_index, symmetric)` | `CsrParquet.Write(indices_col, indptr_col, base_index, u64_indices)` |
-| Parquet edge list | `EdgelistParquet.Read(source_col, target_col, base_index, keep_self_loops, directed)` | `EdgelistParquet.Write(source_col, target_col, base_index, u64_ids, expand_symmetric)` |
-| Node list         | `Nodelist.Csv(comment_char, skip_rows, base_index)` | — |
-| Label list        | `Labels.Csv(comment_char, skip_rows)` | — |
+|                   | Read spec                                                                               | Write spec                                                                             |
+|---                |---                                                                                      |---                                                                                     |
+| CSV edge list     | `CsvEdgelist.Read(sep, comment_char, skip_rows, base_index, keep_self_loops, directed)` | `CsvEdgelist.Write(sep, base_index, expand_symmetric)`                                 |
+| METIS             | `Metis.Read(comment_char, base_index)`                                                  | `Metis.Write(base_index)`                                                              |
+| CSR Parquet       | `CsrParquet.Read(indices_col, indptr_col, base_index, symmetric)`                       | `CsrParquet.Write(indices_col, indptr_col, base_index, u64_indices)`                   |
+| Parquet edge list | `EdgelistParquet.Read(source_col, target_col, base_index, keep_self_loops, directed)`   | `EdgelistParquet.Write(source_col, target_col, base_index, u64_ids, expand_symmetric)` |
+| Node list         | `Nodelist.Csv(comment_char, skip_rows, base_index)`                                     | —                                                                                      |
+| Label list        | `Labels.Csv(comment_char, skip_rows)`                                                   | —                                                                                      |
 
 `GraphDescriptor(path, spec)` describes both sides. With a read spec the path is an
 existing file and is checked at construction; with a write spec it is the prefix
@@ -123,24 +123,10 @@ graph = fmt.GraphDescriptor(
 fmt.convert(graph, fmt.GraphDescriptor("out/g", fmt.CsrParquet.Write()), nodes=nodes)
 ```
 
-### CSR column names
-
-`CsrParquet` column names default to `indices` and `indptr` but are overridable on
-both sides, so a CSR written by another tool (for example
-[icebug-format](https://github.com/Ladybug-Memory/icebug-format), which names them
-`target` and `ptr`) can be read directly:
-
-```python
-fmt.GraphDescriptor("g.indices.parquet",
-                    fmt.CsrParquet.Read(indices_col="target", indptr_col="ptr"))
-```
-
 ### Parquet node lists
 
 Node lists must be CSV. A node list is `N` rows rather than `E`, so converting one
-externally is cheap even when converting an edge list would not be — for a graph
-with 272M nodes it is ~2.7 GB of text, against ~100 GB for a 5B-edge list, which is
-why the edge list is supported natively and this is not:
+externally is cheap relative to converting an edge list. The following recipe works:
 
 ```python
 import polars as pl
@@ -255,9 +241,9 @@ See `DESIGN.md` for the rationale behind these and the rest of the implementatio
 
 An edgelist is a character-delimited text file containing at least two columns:
 
-| Column | Description |
-|--------|-------------|
-| source | Node ID representing the source of an edge (in directed graphs) or one endpoint (in undirected graphs) |
+| Column | Description                                                                                                  |
+|--------|-------------                                                                                                 |
+| source | Node ID representing the source of an edge (in directed graphs) or one endpoint (in undirected graphs)       |
 | target | Node ID representing the target of an edge (in directed graphs) or the other endpoint (in undirected graphs) |
 
 Nodes may not need to have contiguous IDs.
@@ -268,7 +254,7 @@ Compressed Sparse Row format is a compact representation of the (directed) adjac
 We store the indices as the columns in which each row has data.
 The non-zero entries denote the boundaries of the rows.
 
-Here, we use 64 bit nodeIDs, to be consistent with [icebug](https://github.com/Ladybug-Memory/icebug/).
+Use 64 bit nodeIDs to be consistent with [icebug](https://github.com/Ladybug-Memory/icebug/).
 
 ### METIS
 
@@ -314,6 +300,10 @@ These experiments are non-extensive.
 ## Comparison to icebug-format
 
 TODO; minhyuk's duckdb icebug pipeline does edgelist to csr
+
+## Comparison to polars
+
+TODO;
 
 ## Conversion to NetworKit
 
