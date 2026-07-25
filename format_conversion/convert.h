@@ -24,11 +24,14 @@ void convert_graph(const GraphDescriptor &input, const GraphDescriptor &output, 
 {
     requireSide(input, true, "convert");
     requireSide(output, false, "convert");
+    validateSpecBase(input.spec);
+    validateSpecBase(output.spec);
     requireMetisTargetsSymmetric(input, output.spec);
 
     BuiltGraph<K, O> bg = buildGraph<K, O>(input, nodes, num_threads);
     if (sort_neighbors)
         sortNeighbors(bg.g, static_cast<int>(num_threads));
+    validateWriteBase(bg, specBaseIndex(output.spec));
     writeGraph(bg, output.path, output.spec, num_threads);
 }
 
@@ -39,15 +42,22 @@ void convert_graph(const GraphDescriptor &input, const std::vector<GraphDescript
                    const NodeDescriptor *nodes, size_t num_threads, bool sort_neighbors)
 {
     requireSide(input, true, "convert");
+    validateSpecBase(input.spec);
     for (const auto &out : outputs)
     {
         requireSide(out, false, "convert");
+        validateSpecBase(out.spec);
         requireMetisTargetsSymmetric(input, out.spec);
     }
 
     BuiltGraph<K, O> bg = buildGraph<K, O>(input, nodes, num_threads);
     if (sort_neighbors)
         sortNeighbors(bg.g, static_cast<int>(num_threads));
+
+    // The base_index bound needs the span, so it is the one check that cannot run
+    // before the build; still every target, before the first byte is written.
+    for (const auto &out : outputs)
+        validateWriteBase(bg, specBaseIndex(out.spec));
 
     for (const auto &out : outputs)
         writeGraph(bg, out.path, out.spec, num_threads);

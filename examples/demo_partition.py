@@ -51,6 +51,7 @@ def main() -> None:
     output_spec = fmt.CsrParquet.Write(
         indices_col="indices",
         indptr_col="indptr",
+        base_index=0,               # partition() accepts only the format's default
         u64_indices=False,
     )
 

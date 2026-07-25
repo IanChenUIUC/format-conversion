@@ -71,6 +71,47 @@ determine it themselves; a CSR Parquet file records nothing about direction, so
 would silently reinstate the METIS hole for exactly the round trip most likely to
 hit it, which is why it is a field rather than an assumption.
 
+## `base_index` on both sides
+
+`base_index` is the id of the first vertex as it appears in the file: reading
+subtracts it, writing adds it. Every graph spec on both sides carries it, so the
+formats' indexing conventions are stated in the API instead of hidden in the
+readers. Two of them used to be literals — METIS subtracted 1 on read and added 1
+on write, and CSR Parquet assumed 0 with no way to say otherwise.
+
+The single-sentence definition is what makes the round trips close, and it forced
+the CSR write to be more than an offset. `indices += k` alone would produce a file
+whose ids run past the end of `indptr`; prepending `k` zero entries is what makes
+the two columns agree, and it is also exactly what a 1-indexed CSR looks like in
+the wild. `CsrParquet.Read` inverts both halves, and refuses a file whose leading
+vertices carry edges rather than dropping them — an edge-list reader can discard an
+out-of-range edge, but a CSR has no per-edge drop that keeps `offsets` consistent.
+
+METIS is the one format restricted to `{0, 1}`. Its lines carry no vertex id: line
+*i* is vertex *i* + `base_index`, so a larger base would leave the line ordering
+disagreeing with the neighbour ids written on the line. Restricting the writer as
+well as the reader keeps everything it emits readable back at the same base.
+Prepending isolated vertices, the natural reading of a larger base, is simply not
+expressible in METIS, and the alternative — leading blank lines plus an inflated
+header — produced files that could not be read back with the value that wrote them.
+
+Ids are `K = uint32_t` throughout, so the largest emitted id, `span - 1 + k`, is
+checked against `UINT32_MAX` before any output is written. That check needs the
+span, so it is the one validation that cannot run before the build; it still runs
+over every target ahead of the first byte, preserving the all-or-nothing guarantee.
+The bound applies even on the `u64_indices` / `u64_ids` paths, whose columns could
+hold more: one rule keeps `numDigits` and the `to_chars` buffers 32-bit, so the
+per-id hot path in the text writers is unchanged.
+
+A non-zero base costs `CsrParquet.Write` its zero-copy path, since neither shifted
+column exists in memory. Both then go through `writeParquetIdColumns`, which bounds
+scratch at `PARQUET_CHUNK_ROWS` rather than materialising a second `indptr` — about
+2.2 GB at 272M nodes. At the default the zero-copy writes are untouched.
+
+`partition()` accepts only each format's default. A label's `nodes.csv` row *i* is
+its local id *i*, and a shifted numbering would break that with no way to express
+the phantom rows.
+
 ## What is memory-mapped, and for how long
 
 Only the two text formats are mapped, and only for the duration of `buildGraph`:

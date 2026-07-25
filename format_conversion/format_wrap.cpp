@@ -72,36 +72,46 @@ PYBIND11_MODULE(format, m)
         .def_readwrite("keep_self_loops", &CsvEdgelistRead::keep_self_loops)
         .def_readwrite("directed", &CsvEdgelistRead::directed);
     py::class_<CsvEdgelistWrite>(csv, "Write")
-        .def(py::init([](char sep, bool expand_symmetric) { return CsvEdgelistWrite{sep, expand_symmetric}; }),
-             py::kw_only(), py::arg("sep") = ',', py::arg("expand_symmetric") = false)
+        .def(py::init([](char sep, uint64_t base_index, bool expand_symmetric) {
+                 return CsvEdgelistWrite{sep, base_index, expand_symmetric};
+             }),
+             py::kw_only(), py::arg("sep") = ',', py::arg("base_index") = uint64_t{0},
+             py::arg("expand_symmetric") = false)
         .def_readwrite("sep", &CsvEdgelistWrite::sep)
+        .def_readwrite("base_index", &CsvEdgelistWrite::base_index)
         .def_readwrite("expand_symmetric", &CsvEdgelistWrite::expand_symmetric);
 
     auto metis = formatHolder<MetisTag>(m, "Metis");
     py::class_<MetisRead>(metis, "Read")
-        .def(py::init([](char comment_char) { return MetisRead{comment_char}; }), py::kw_only(),
-             py::arg("comment_char") = '#')
-        .def_readwrite("comment_char", &MetisRead::comment_char);
-    py::class_<MetisWrite>(metis, "Write").def(py::init<>());
+        .def(py::init([](char comment_char, uint64_t base_index) { return MetisRead{comment_char, base_index}; }),
+             py::kw_only(), py::arg("comment_char") = '#', py::arg("base_index") = uint64_t{1})
+        .def_readwrite("comment_char", &MetisRead::comment_char)
+        .def_readwrite("base_index", &MetisRead::base_index);
+    py::class_<MetisWrite>(metis, "Write")
+        .def(py::init([](uint64_t base_index) { return MetisWrite{base_index}; }), py::kw_only(),
+             py::arg("base_index") = uint64_t{1})
+        .def_readwrite("base_index", &MetisWrite::base_index);
 
     auto csr = formatHolder<CsrParquetTag>(m, "CsrParquet");
     py::class_<CsrParquetRead>(csr, "Read")
-        .def(py::init([](std::string indices_col, std::string indptr_col, bool symmetric) {
-                 return CsrParquetRead{std::move(indices_col), std::move(indptr_col), symmetric};
+        .def(py::init([](std::string indices_col, std::string indptr_col, uint64_t base_index, bool symmetric) {
+                 return CsrParquetRead{std::move(indices_col), std::move(indptr_col), base_index, symmetric};
              }),
              py::kw_only(), py::arg("indices_col") = "indices", py::arg("indptr_col") = "indptr",
-             py::arg("symmetric") = true)
+             py::arg("base_index") = uint64_t{0}, py::arg("symmetric") = true)
         .def_readwrite("indices_col", &CsrParquetRead::indices_col)
         .def_readwrite("indptr_col", &CsrParquetRead::indptr_col)
+        .def_readwrite("base_index", &CsrParquetRead::base_index)
         .def_readwrite("symmetric", &CsrParquetRead::symmetric);
     py::class_<CsrParquetWrite>(csr, "Write")
-        .def(py::init([](std::string indices_col, std::string indptr_col, bool u64_indices) {
-                 return CsrParquetWrite{std::move(indices_col), std::move(indptr_col), u64_indices};
+        .def(py::init([](std::string indices_col, std::string indptr_col, uint64_t base_index, bool u64_indices) {
+                 return CsrParquetWrite{std::move(indices_col), std::move(indptr_col), base_index, u64_indices};
              }),
              py::kw_only(), py::arg("indices_col") = "indices", py::arg("indptr_col") = "indptr",
-             py::arg("u64_indices") = false)
+             py::arg("base_index") = uint64_t{0}, py::arg("u64_indices") = false)
         .def_readwrite("indices_col", &CsrParquetWrite::indices_col)
         .def_readwrite("indptr_col", &CsrParquetWrite::indptr_col)
+        .def_readwrite("base_index", &CsrParquetWrite::base_index)
         .def_readwrite("u64_indices", &CsrParquetWrite::u64_indices);
 
     auto epq = formatHolder<EdgelistParquetTag>(m, "EdgelistParquet");
@@ -119,14 +129,17 @@ PYBIND11_MODULE(format, m)
         .def_readwrite("keep_self_loops", &EdgelistParquetRead::keep_self_loops)
         .def_readwrite("directed", &EdgelistParquetRead::directed);
     py::class_<EdgelistParquetWrite>(epq, "Write")
-        .def(py::init([](std::string source_col, std::string target_col, bool u64_ids, bool expand_symmetric) {
-                 return EdgelistParquetWrite{std::move(source_col), std::move(target_col), u64_ids,
+        .def(py::init([](std::string source_col, std::string target_col, uint64_t base_index, bool u64_ids,
+                         bool expand_symmetric) {
+                 return EdgelistParquetWrite{std::move(source_col), std::move(target_col), base_index, u64_ids,
                                              expand_symmetric};
              }),
              py::kw_only(), py::arg("source_col") = "source", py::arg("target_col") = "target",
-             py::arg("u64_ids") = false, py::arg("expand_symmetric") = false)
+             py::arg("base_index") = uint64_t{0}, py::arg("u64_ids") = false,
+             py::arg("expand_symmetric") = false)
         .def_readwrite("source_col", &EdgelistParquetWrite::source_col)
         .def_readwrite("target_col", &EdgelistParquetWrite::target_col)
+        .def_readwrite("base_index", &EdgelistParquetWrite::base_index)
         .def_readwrite("u64_ids", &EdgelistParquetWrite::u64_ids)
         .def_readwrite("expand_symmetric", &EdgelistParquetWrite::expand_symmetric);
 

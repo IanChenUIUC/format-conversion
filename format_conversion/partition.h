@@ -132,8 +132,14 @@ void partition_graph(const GraphDescriptor &input, const std::string &labels_pat
     if (isReadSpec(output_spec))
         throw std::runtime_error("partition: output descriptor carries a read spec (" + specName(output_spec) +
                                  "); expected a write spec");
+    validateSpecBase(input.spec);
+    validateSpecBase(output_spec);
     if (sort_neighbors)
         throw NotImplemented("sort_neighbors is not implemented for partition()");
+    // Row i of a label's nodes.csv is its local id i; a shifted numbering would
+    // break that correspondence.
+    if (!hasDefaultBaseIndex(output_spec))
+        throw NotImplemented("base_index is not implemented for partition()");
 
     // 1. Build graph + NodeMap.
     NodeMap<K> nm;

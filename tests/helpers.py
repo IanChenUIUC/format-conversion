@@ -62,7 +62,8 @@ def _edge(u: int, v: int) -> tuple[int, int]:
     return (min(u, v), max(u, v))
 
 
-def read_edgelist(path: Path, sep: str = ",", header: bool = True) -> frozenset:
+def read_edgelist(path: Path, sep: str = ",", header: bool = True,
+                  base: int = 0) -> frozenset:
     edges: set[tuple[int, int]] = set()
     with open(path) as f:
         if header:
@@ -72,11 +73,12 @@ def read_edgelist(path: Path, sep: str = ",", header: bool = True) -> frozenset:
             if not line or line.startswith("#"):
                 continue
             parts = line.split(sep)
-            edges.add(_edge(int(parts[0]), int(parts[1])))
+            edges.add(_edge(int(parts[0]) - base, int(parts[1]) - base))
     return frozenset(edges)
 
 
-def read_edgelist_arcs(path: Path, sep: str = ",", header: bool = False) -> list[tuple[int, int]]:
+def read_edgelist_arcs(path: Path, sep: str = ",", header: bool = False,
+                       base: int = 0) -> list[tuple[int, int]]:
     """Read a CSV edge list as a *directed*, order- and multiplicity-preserving
     sorted list of (u, v) arcs (unlike read_edgelist, which folds to undirected
     (min,max) and dedups). Use for directed-output assertions."""
@@ -89,45 +91,50 @@ def read_edgelist_arcs(path: Path, sep: str = ",", header: bool = False) -> list
             if not line or line.startswith("#"):
                 continue
             parts = line.split(sep)
-            arcs.append((int(parts[0]), int(parts[1])))
+            arcs.append((int(parts[0]) - base, int(parts[1]) - base))
     return sorted(arcs)
 
 
-def read_csr_arcs(base_path: Path) -> list[tuple[int, int]]:
+def read_csr_arcs(base_path: Path, base: int = 0) -> list[tuple[int, int]]:
     """Read the CSR Parquet as directed arcs (u -> v) for every stored edgeKey,
     preserving direction and multiplicity. Sorted for stable comparison."""
     import pyarrow.parquet as pq
     indices = pq.read_table(str(base_path) + ".indices.parquet").column(0).to_pylist()
     indptr  = pq.read_table(str(base_path) + ".indptr.parquet").column(0).to_pylist()
+    indptr = indptr[base:]
     arcs: list[tuple[int, int]] = []
     for u in range(len(indptr) - 1):
         for i in range(indptr[u], indptr[u + 1]):
-            arcs.append((u, indices[i]))
+            arcs.append((u, indices[i] - base))
     return sorted(arcs)
 
 
 def read_edgelist_parquet(path: Path, source_col: str = "source",
-                          target_col: str = "target") -> frozenset:
+                          target_col: str = "target", base: int = 0) -> frozenset:
     """Read a Parquet edge list as undirected (min,max) pairs."""
     import pyarrow.parquet as pq
     t = pq.read_table(path)
-    return frozenset(_edge(u, v) for u, v in zip(t[source_col].to_pylist(),
-                                                 t[target_col].to_pylist()))
+    return frozenset(_edge(u - base, v - base)
+                     for u, v in zip(t[source_col].to_pylist(),
+                                     t[target_col].to_pylist()))
 
 
 def read_edgelist_parquet_arcs(path: Path, source_col: str = "source",
-                               target_col: str = "target") -> list[tuple[int, int]]:
+                               target_col: str = "target",
+                               base: int = 0) -> list[tuple[int, int]]:
     """Read a Parquet edge list as directed, multiplicity-preserving sorted arcs."""
     import pyarrow.parquet as pq
     t = pq.read_table(path)
-    return sorted(zip(t[source_col].to_pylist(), t[target_col].to_pylist()))
+    return sorted((u - base, v - base)
+                  for u, v in zip(t[source_col].to_pylist(), t[target_col].to_pylist()))
 
 
-def read_metis(path: Path) -> frozenset:
+def read_metis(path: Path, base: int = 1) -> frozenset:
     """
     Read a METIS adjacency-list file.
     Returns undirected edges as (u, v) with u < v, 0-indexed.
-    METIS format: first line is "N M", then N lines of 1-indexed space-separated neighbors.
+    METIS format: first line is "N M", then N lines of space-separated neighbors
+    whose ids start at `base`.
     """
     edges: set[tuple[int, int]] = set()
     with open(path) as f:
@@ -135,13 +142,13 @@ def read_metis(path: Path) -> frozenset:
         n, m = int(header[0]), int(header[1])
         for u, line in enumerate(f):
             for tok in line.split():
-                v = int(tok) - 1  # METIS is 1-indexed
+                v = int(tok) - base
                 if u < v:
                     edges.add((u, v))
     return frozenset(edges)
 
 
-def read_csr_parquet(base_path: Path) -> frozenset:
+def read_csr_parquet(base_path: Path, base: int = 0) -> frozenset:
     """
     Read the two-file CSR Parquet representation produced by writeGraph.
     base_path should not include the .indices.parquet / .indptr.parquet suffix.
@@ -149,10 +156,11 @@ def read_csr_parquet(base_path: Path) -> frozenset:
     import pyarrow.parquet as pq
     indices = pq.read_table(str(base_path) + ".indices.parquet")["indices"].to_pylist()
     indptr  = pq.read_table(str(base_path) + ".indptr.parquet")["indptr"].to_pylist()
+    indptr = indptr[base:]
     edges: set[tuple[int, int]] = set()
     for u in range(len(indptr) - 1):
         for i in range(indptr[u], indptr[u + 1]):
-            v = indices[i]
+            v = indices[i] - base
             if u < v:
                 edges.add((u, v))
     return frozenset(edges)

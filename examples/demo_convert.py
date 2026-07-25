@@ -31,7 +31,7 @@ def main() -> None:
         sep=",",                    # ',' | '\t' | ' '
         comment_char="#",           # '#' | '%'
         skip_rows=1,
-        base_index=0,               # subtracted from every raw id
+        base_index=0,               # id of the first vertex in the file; subtracted on read
         keep_self_loops=False,
         directed=False,             # False stores both directions of each edge; True only u->v
     )
@@ -49,12 +49,14 @@ def main() -> None:
     # input_spec = fmt.CsrParquet.Read(
     #     indices_col="indices",
     #     indptr_col="indptr",
+    #     base_index=0,             # k drops k leading indptr entries and subtracts k from indices
     #     symmetric=True,           # the file stores both directions of each edge
     # )
 
     # edges_file = INPUT / "dnc.metis"
     # input_spec = fmt.Metis.Read(
     #     comment_char="#",
+    #     base_index=1,             # METIS is 1-indexed; 0 or 1 only
     # )
 
     graph_in = fmt.GraphDescriptor(edges_file, input_spec)
@@ -64,22 +66,27 @@ def main() -> None:
     output_spec = fmt.CsrParquet.Write(     # -> dnc.indices.parquet, dnc.indptr.parquet
         indices_col="indices",
         indptr_col="indptr",
+        base_index=0,               # id of the first vertex in the file; added on write
         u64_indices=False,          # widen the indices column to uint64
     )
 
     # output_spec = fmt.CsvEdgelist.Write(  # -> dnc.csv
     #     sep=",",
+    #     base_index=0,
     #     expand_symmetric=False,   # True emits both u,v and v,u for each undirected edge
     # )
 
     # output_spec = fmt.EdgelistParquet.Write(   # -> dnc.parquet
     #     source_col="source",
     #     target_col="target",
+    #     base_index=0,
     #     u64_ids=False,            # widen both id columns to uint64
     #     expand_symmetric=False,
     # )
 
-    # output_spec = fmt.Metis.Write()       # -> dnc.metis, undirected output only
+    # output_spec = fmt.Metis.Write(        # -> dnc.metis, undirected output only
+    #     base_index=1,             # METIS is 1-indexed; 0 or 1 only
+    # )
 
     graph_out = fmt.GraphDescriptor(output_path, output_spec)
 

@@ -414,7 +414,8 @@ DiGraphCsr<K, O> buildCSRFromCSV(std::string_view data, NodeMap<K> &nm, const Cs
 }
 
 // Build a CSR from a METIS adjacency-list file (single pass; the "N M" header
-// gives both counts up front). Neighbor ids are 1-indexed in the file.
+// gives both counts up front). The i-th adjacency line is vertex i, whose file id
+// is i + spec.base_index; neighbor ids carry that same base.
 template <class K = uint32_t, class O = uint64_t>
 DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const MetisRead &spec)
 {
@@ -446,6 +447,7 @@ DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const MetisRead &spe
     g.offsets.resize(N + 1);
     g.edgeKeys.resize(2 * M);
 
+    const K base = static_cast<K>(spec.base_index);
     O edge_pos = O{};
     for (size_t u = 0; u < N; ++u)
     {
@@ -464,7 +466,10 @@ DiGraphCsr<K, O> buildGraphFromMETIS(std::string_view data, const MetisRead &spe
             auto r = std::from_chars(p, end, v);
             if (r.ec != std::errc{})
                 break;
-            g.edgeKeys[edge_pos++] = v - K{1};
+            if (v < base)
+                throw std::runtime_error("METIS neighbor id " + std::to_string(v) + " is below base_index " +
+                                         std::to_string(spec.base_index));
+            g.edgeKeys[edge_pos++] = v - base;
             p = r.ptr;
         }
         skipLine();
@@ -650,6 +655,33 @@ DiGraphCsr<K, O> buildCSRFromEdgelistParquet(const std::string &path, NodeMap<K>
     });
 }
 
+// Rebase a CSR read from a file whose first vertex is numbered `base`: drop the
+// leading entries of offsets and shift every neighbor id down. The inverse of what
+// CsrParquet.Write does, so it refuses a file whose leading vertices carry edges
+// rather than silently discarding them — a CSR has no per-edge drop that keeps
+// offsets consistent.
+template <class K, class O> void dropCsrBase(DiGraphCsr<K, O> &g, uint64_t base)
+{
+    if (base == 0)
+        return;
+    if (g.offsets.size() <= base)
+        throw std::runtime_error("CsrParquet.Read: indptr is shorter than base_index " + std::to_string(base));
+    for (uint64_t i = 0; i <= base; ++i)
+        if (g.offsets[i] != O{})
+            throw std::runtime_error("CsrParquet.Read: base_index " + std::to_string(base) +
+                                     " requires the leading vertices to have no edges");
+    g.offsets.erase(g.offsets.begin(), g.offsets.begin() + static_cast<ptrdiff_t>(base));
+
+    const K k = static_cast<K>(base);
+    for (K &v : g.edgeKeys)
+    {
+        if (v < k)
+            throw std::runtime_error("CsrParquet.Read: index " + std::to_string(v) + " is below base_index " +
+                                     std::to_string(base));
+        v -= k;
+    }
+}
+
 // Sort each vertex's adjacency list in place. num_threads <= 0 uses all available.
 template <class K, class O> void sortNeighbors(DiGraphCsr<K, O> &g, int num_threads = 0)
 {
@@ -715,6 +747,7 @@ BuiltGraph<K, O> buildGraph(const GraphDescriptor &gd, const NodeDescriptor *nd,
 
                 out.g.edgeKeys = readParquetColumn<K>(base + ".indices.parquet", spec.indices_col);
                 out.g.offsets = readParquetColumn<O>(base + ".indptr.parquet", spec.indptr_col);
+                dropCsrBase(out.g, spec.base_index);
             }
             else
                 throw std::logic_error("buildGraph: not a read spec");

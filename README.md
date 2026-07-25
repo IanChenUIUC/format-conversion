@@ -39,10 +39,10 @@ silently ignored.
 
 | | Read spec | Write spec |
 |---|---|---|
-| CSV edge list     | `CsvEdgelist.Read(sep, comment_char, skip_rows, base_index, keep_self_loops, directed)` | `CsvEdgelist.Write(sep, expand_symmetric)` |
-| METIS             | `Metis.Read(comment_char)` | `Metis.Write()` |
-| CSR Parquet       | `CsrParquet.Read(indices_col, indptr_col, symmetric)` | `CsrParquet.Write(indices_col, indptr_col, u64_indices)` |
-| Parquet edge list | `EdgelistParquet.Read(source_col, target_col, base_index, keep_self_loops, directed)` | `EdgelistParquet.Write(source_col, target_col, u64_ids, expand_symmetric)` |
+| CSV edge list     | `CsvEdgelist.Read(sep, comment_char, skip_rows, base_index, keep_self_loops, directed)` | `CsvEdgelist.Write(sep, base_index, expand_symmetric)` |
+| METIS             | `Metis.Read(comment_char, base_index)` | `Metis.Write(base_index)` |
+| CSR Parquet       | `CsrParquet.Read(indices_col, indptr_col, base_index, symmetric)` | `CsrParquet.Write(indices_col, indptr_col, base_index, u64_indices)` |
+| Parquet edge list | `EdgelistParquet.Read(source_col, target_col, base_index, keep_self_loops, directed)` | `EdgelistParquet.Write(source_col, target_col, base_index, u64_ids, expand_symmetric)` |
 | Node list         | `Nodelist.Csv(comment_char, skip_rows, base_index)` | — |
 | Label list        | `Labels.Csv(comment_char, skip_rows)` | — |
 
@@ -67,6 +67,39 @@ fmt.convert(graph, out, nodes=nodes, num_threads=16, sort_neighbors=True)
 Passing a write spec where a read spec belongs (or the reverse) is rejected with a
 message naming the offending spec. `examples/demo_convert.py` lists every field of
 every spec at its default value.
+
+### `base_index`
+
+`base_index` is the id of the first vertex as it appears in the file. Reading
+subtracts it, writing adds it, so `Metis.Read(base_index=b)` →
+`Metis.Write(base_index=b)` and `CsrParquet.Write(base_index=k)` →
+`CsrParquet.Read(base_index=k)` are both round trips. It defaults to 0 everywhere
+except the two METIS specs, where it defaults to 1.
+
+```python
+# 1-indexed CSV in, 1-indexed CSR Parquet out
+fmt.convert(
+    fmt.GraphDescriptor("edges.csv", fmt.CsvEdgelist.Read(base_index=1)),
+    fmt.GraphDescriptor("out/g",     fmt.CsrParquet.Write(base_index=1)),
+)
+```
+
+Three format-specific notes:
+
+- **METIS accepts only 0 or 1.** A METIS line carries no vertex id — line *i* is
+  vertex *i* + `base_index` — so any other value would desynchronise the line
+  order from the neighbour ids on the line.
+- **`CsrParquet.Write(base_index=k)`** also prepends *k* zero entries to `indptr`,
+  which is what makes the ids consistent with the offsets. `CsrParquet.Read`
+  reverses that, and requires those leading vertices to have no edges rather than
+  discarding them.
+- **Edge lists cannot represent isolated vertices**, so writing one with a
+  non-zero `base_index` shifts the ids and nothing else.
+
+Ids are 32-bit, so a `base_index` that would push the largest id past `UINT32_MAX`
+is rejected before anything is written. `partition()` accepts only each format's
+default, since a shifted numbering would break the correspondence between a
+label's `nodes.csv` rows and its local ids.
 
 ### Parquet edge lists
 

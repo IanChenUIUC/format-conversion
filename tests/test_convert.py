@@ -12,7 +12,7 @@ from pathlib import Path
 from .formats import FORMATS, Format
 from .helpers import (write_edgelist, read_edgelist_arcs, read_csr_arcs,
                       write_edgelist_parquet, read_edgelist_parquet,
-                      read_edgelist_parquet_arcs)
+                      read_edgelist_parquet_arcs, read_csr_parquet)
 
 try:
     import format_conversion.format as fmt
@@ -42,8 +42,14 @@ def _csv_out(path, **kw) -> GraphDescriptor:
 def _csr_out(path, **kw) -> GraphDescriptor:
     return GraphDescriptor(str(path), fmt.CsrParquet.Write(**kw))
 
-def _metis_out(path) -> GraphDescriptor:
-    return GraphDescriptor(str(path), fmt.Metis.Write())
+def _metis_out(path, **kw) -> GraphDescriptor:
+    return GraphDescriptor(str(path), fmt.Metis.Write(**kw))
+
+def _metis_in(path, **kw) -> GraphDescriptor:
+    return GraphDescriptor(str(path), fmt.Metis.Read(**kw))
+
+def _csr_in(path, **kw) -> GraphDescriptor:
+    return GraphDescriptor(str(path) + ".indices.parquet", fmt.CsrParquet.Read(**kw))
 
 def _pq_out(path, **kw) -> GraphDescriptor:
     return GraphDescriptor(str(path), fmt.EdgelistParquet.Write(**kw))
@@ -627,3 +633,138 @@ def test_u64_csr_indices_match_u32(tmp_path):
     assert n.schema.field(0).type == pa.uint32()
     assert w.schema.field(0).type == pa.uint64()
     assert n.column(0).to_pylist() == w.column(0).to_pylist()
+
+
+# ── base_index on the write side ──────────────────────────────────────────────
+
+# path graph 0-1-2, as METIS writes it at each of the two permitted bases
+_PATH3_EDGES = [(0, 1), (1, 2)]
+_PATH3_METIS = {1: "3 2\n2\n1 3\n2\n",
+                0: "3 2\n1\n0 2\n1\n"}
+
+
+@pytest.mark.parametrize("base", [0, 1])
+def test_metis_write_base(tmp_path, base):
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+    out = tmp_path / "out"
+    convert(_plain_csv_in(edges_path), _metis_out(out, base_index=base), sort_neighbors=True)
+    assert (tmp_path / "out.metis").read_text() == _PATH3_METIS[base]
+
+
+@pytest.mark.parametrize("base", [0, 1])
+def test_metis_round_trip_base(tmp_path, base):
+    """Reading and writing at the same base reproduces the file."""
+    src = tmp_path / "in.metis"
+    src.write_text(_PATH3_METIS[base])
+    out = tmp_path / "out"
+    convert(_metis_in(src, base_index=base), _metis_out(out, base_index=base))
+    assert (tmp_path / "out.metis").read_text() == _PATH3_METIS[base]
+
+
+def test_metis_base_above_one_rejected(tmp_path):
+    """A METIS line carries no vertex id, so only 0 and 1 are representable."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+    src = tmp_path / "in.metis"
+    src.write_text(_PATH3_METIS[1])
+    out = tmp_path / "out"
+
+    with pytest.raises(RuntimeError, match="positional"):
+        convert(_plain_csv_in(edges_path), _metis_out(out, base_index=2))
+    with pytest.raises(RuntimeError, match="positional"):
+        convert(_metis_in(src, base_index=2), _csr_out(out))
+
+
+def test_csr_write_base_prepends_isolated_vertices(tmp_path):
+    """base_index=k shifts every index and gives indptr k leading zeros, which is
+    what keeps the two columns consistent."""
+    import pyarrow.parquet as pq
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+
+    plain, shifted = tmp_path / "plain", tmp_path / "shifted"
+    convert(_plain_csv_in(edges_path), _csr_out(plain), sort_neighbors=True)
+    convert(_plain_csv_in(edges_path), _csr_out(shifted, base_index=1), sort_neighbors=True)
+
+    p_ptr = pq.read_table(str(plain) + ".indptr.parquet").column(0).to_pylist()
+    s_ptr = pq.read_table(str(shifted) + ".indptr.parquet").column(0).to_pylist()
+    s_idx = pq.read_table(str(shifted) + ".indices.parquet").column(0).to_pylist()
+
+    assert s_ptr == [0] + p_ptr
+    assert all(v >= 1 for v in s_idx)
+    assert read_csr_parquet(shifted, base=1) == read_csr_parquet(plain)
+
+
+def test_csr_round_trip_base(tmp_path):
+    """Writing at base k and reading at base k is the identity."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+
+    plain, shifted, back = tmp_path / "plain", tmp_path / "shifted", tmp_path / "back"
+    convert(_plain_csv_in(edges_path), _csr_out(plain), sort_neighbors=True)
+    convert(_plain_csv_in(edges_path), _csr_out(shifted, base_index=1), sort_neighbors=True)
+    convert(_csr_in(shifted, base_index=1), _csr_out(back), sort_neighbors=True)
+
+    for suffix in (".indices.parquet", ".indptr.parquet"):
+        assert Path(str(back) + suffix).read_bytes() == Path(str(plain) + suffix).read_bytes()
+
+
+def test_csr_read_base_requires_isolated_prefix(tmp_path):
+    """Vertex 0 has edges, so dropping it would silently discard them."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+    csr = tmp_path / "csr"
+    convert(_plain_csv_in(edges_path), _csr_out(csr))
+    with pytest.raises(RuntimeError, match="no edges"):
+        convert(_csr_in(csr, base_index=1), _csv_out(tmp_path / "out"))
+
+
+def test_csv_write_base_shifts_every_id(tmp_path):
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+
+    plain, shifted = tmp_path / "plain", tmp_path / "shifted"
+    convert(_plain_csv_in(edges_path), _csv_out(plain), sort_neighbors=True)
+    convert(_plain_csv_in(edges_path), _csv_out(shifted, base_index=5), sort_neighbors=True)
+
+    p_lines = (tmp_path / "plain.csv").read_text().splitlines()
+    s_lines = (tmp_path / "shifted.csv").read_text().splitlines()
+    assert len(p_lines) == len(s_lines)
+    assert read_edgelist_arcs(tmp_path / "shifted.csv", base=5) == \
+           read_edgelist_arcs(tmp_path / "plain.csv")
+
+
+def test_edgelist_parquet_write_base_shifts_every_id(tmp_path):
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+
+    plain, shifted = tmp_path / "plain", tmp_path / "shifted"
+    convert(_plain_csv_in(edges_path), _pq_out(plain), sort_neighbors=True)
+    convert(_plain_csv_in(edges_path), _pq_out(shifted, base_index=5), sort_neighbors=True)
+
+    assert read_edgelist_parquet_arcs(str(shifted) + ".parquet", base=5) == \
+           read_edgelist_parquet_arcs(str(plain) + ".parquet")
+
+
+@pytest.mark.parametrize("spec_out", ["csv", "csr", "edgelist_parquet"])
+def test_base_index_overflow_rejected(tmp_path, spec_out):
+    """Emitted ids stay 32-bit, so a base that pushes the largest past UINT32_MAX
+    is rejected before anything is written."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+    out = tmp_path / "out"
+    maker = {"csv": _csv_out, "csr": _csr_out, "edgelist_parquet": _pq_out}[spec_out]
+    with pytest.raises(RuntimeError, match="overflows the 32-bit id range"):
+        convert(_plain_csv_in(edges_path), maker(out, base_index=2**32))
+    assert not list(tmp_path.glob("out*"))
+
+
+def test_base_index_overflow_is_all_or_nothing(tmp_path):
+    """A bad base on the second target leaves the first unwritten too."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+    good, bad = tmp_path / "good", tmp_path / "bad"
+    with pytest.raises(RuntimeError, match="overflows the 32-bit id range"):
+        convert(_plain_csv_in(edges_path), [_csv_out(good), _csr_out(bad, base_index=2**32)])
+    assert not (tmp_path / "good.csv").exists()

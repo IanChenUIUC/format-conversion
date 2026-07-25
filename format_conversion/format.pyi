@@ -28,16 +28,34 @@ class CsvEdgelist:
     class Write:
         sep: str
         expand_symmetric: bool
-        def __init__(self, *, sep: str = ',', expand_symmetric: bool = False) -> None:
+        def __init__(self, *, sep: str = ',', base_index: typing.SupportsInt = 0, expand_symmetric: bool = False) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
             ...
 
 class Metis:
     class Read:
         comment_char: str
-        def __init__(self, *, comment_char: str = '#') -> None:
+        def __init__(self, *, comment_char: str = '#', base_index: typing.SupportsInt = 1) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
             ...
     class Write:
-        def __init__(self) -> None:
+        def __init__(self, *, base_index: typing.SupportsInt = 1) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
             ...
 
 class CsrParquet:
@@ -45,13 +63,25 @@ class CsrParquet:
         indices_col: str
         indptr_col: str
         symmetric: bool
-        def __init__(self, *, indices_col: str = 'indices', indptr_col: str = 'indptr', symmetric: bool = True) -> None:
+        def __init__(self, *, indices_col: str = 'indices', indptr_col: str = 'indptr', base_index: typing.SupportsInt = 0, symmetric: bool = True) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
             ...
     class Write:
         indices_col: str
         indptr_col: str
         u64_indices: bool
-        def __init__(self, *, indices_col: str = 'indices', indptr_col: str = 'indptr', u64_indices: bool = False) -> None:
+        def __init__(self, *, indices_col: str = 'indices', indptr_col: str = 'indptr', base_index: typing.SupportsInt = 0, u64_indices: bool = False) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
             ...
 
 class EdgelistParquet:
@@ -73,7 +103,13 @@ class EdgelistParquet:
         target_col: str
         u64_ids: bool
         expand_symmetric: bool
-        def __init__(self, *, source_col: str = 'source', target_col: str = 'target', u64_ids: bool = False, expand_symmetric: bool = False) -> None:
+        def __init__(self, *, source_col: str = 'source', target_col: str = 'target', base_index: typing.SupportsInt = 0, u64_ids: bool = False, expand_symmetric: bool = False) -> None:
+            ...
+        @property
+        def base_index(self) -> int:
+            ...
+        @base_index.setter
+        def base_index(self, arg0: typing.SupportsInt) -> None:
             ...
 
 class Nodelist:

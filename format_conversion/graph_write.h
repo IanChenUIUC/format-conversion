@@ -8,6 +8,7 @@
 #include <charconv>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <vector>
@@ -83,10 +84,23 @@ void writeLinesMmap(const std::string &path, size_t n, std::string_view header, 
     close(fd);
 }
 
+// Ids are emitted as `v + base_index` through the 32-bit text and column paths, so
+// the largest of them has to stay inside K's range.
+template <class K, class O>
+inline void validateWriteBase(const BuiltGraph<K, O> &bg, uint64_t base_index)
+{
+    const size_t n = bg.g.span();
+    if (n == 0)
+        return;
+    if (base_index > uint64_t{std::numeric_limits<uint32_t>::max()} - (n - 1))
+        throw std::runtime_error("base_index " + std::to_string(base_index) +
+                                 " overflows the 32-bit id range (span " + std::to_string(n) + ")");
+}
+
 // Write the CSR as a METIS adjacency-list file. Parallelised over num_threads.
 
 template <class K, class O>
-void writeGraphToMetis(const BuiltGraph<K, O> &bg, const std::string &output_path, const MetisWrite &,
+void writeGraphToMetis(const BuiltGraph<K, O> &bg, const std::string &output_path, const MetisWrite &spec,
                        size_t num_threads)
 {
     // METIS is an undirected adjacency format; its header edge count assumes a
@@ -98,6 +112,7 @@ void writeGraphToMetis(const BuiltGraph<K, O> &bg, const std::string &output_pat
 
     const DiGraphCsr<K, O> &g = bg.g;
     const size_t n = g.span(), m = g.size() / 2;
+    const uint32_t base = (uint32_t)spec.base_index;
     char header[64];
     int hlen = snprintf(header, sizeof(header), "%zu %zu\n", n, m);
 
@@ -107,7 +122,7 @@ void writeGraphToMetis(const BuiltGraph<K, O> &bg, const std::string &output_pat
         g.forEachEdgeKey((K)u, [&](K v) {
             if (!first)
                 ++bytes; // space separator
-            bytes += numDigits((uint32_t)(v + 1));
+            bytes += numDigits((uint32_t)v + base);
             first = false;
         });
         return bytes;
@@ -117,7 +132,7 @@ void writeGraphToMetis(const BuiltGraph<K, O> &bg, const std::string &output_pat
         g.forEachEdgeKey((K)u, [&](K v) {
             if (!first)
                 *p++ = ' ';
-            auto [ptr, _] = std::to_chars(p, p + 11, (uint32_t)(v + 1)); // 1-indexed
+            auto [ptr, _] = std::to_chars(p, p + 11, (uint32_t)v + base);
             p = ptr;
             first = false;
         });
@@ -225,29 +240,54 @@ void writeGraphToParquet(const BuiltGraph<K, O> &bg, const std::string &output_p
     static_assert(sizeof(K) == 4 || sizeof(K) == 8, "indices (K) must be 32- or 64-bit unsigned");
 
     const DiGraphCsr<K, O> &g = bg.g;
+    const uint64_t base = spec.base_index;
 
     // Indices column. Default: emit K-width (uint32 when K=uint32) zero-copy.
-    // When u64_indices is requested and K is narrower than 64-bit, the widened
-    // values exist nowhere in memory, so they are streamed a chunk at a time rather
-    // than materialising a second copy of edgeKeys.
-    if (spec.u64_indices && sizeof(K) < 8)
-    {
-        const K *keys = g.edgeKeys.data();
-        writeParquetIdColumns<uint64_t>(
-            output_path + ".indices.parquet", {spec.indices_col}, static_cast<int64_t>(g.edgeKeys.size()),
-            [keys](int64_t begin, int64_t end, std::vector<std::vector<uint64_t>> &bufs) {
-                for (int64_t i = begin; i < end; ++i)
-                    bufs[0][static_cast<size_t>(i - begin)] = static_cast<uint64_t>(keys[i]);
-            });
-    }
-    else
+    // A widened column or a non-zero base has values that exist nowhere in memory,
+    // so those stream a chunk at a time rather than materialising a second copy of
+    // edgeKeys.
+    if (base == 0 && !(spec.u64_indices && sizeof(K) < 8))
     {
         auto idx_type = sizeof(K) == 4 ? arrow::uint32() : arrow::uint64();
         writeParquetColumn(output_path + ".indices.parquet", spec.indices_col,
                            wrapZeroCopy(g.edgeKeys.data(), static_cast<int64_t>(g.edgeKeys.size()), idx_type));
     }
-    writeParquetColumn(output_path + ".indptr.parquet", spec.indptr_col,
-                       wrapZeroCopy(g.offsets.data(), static_cast<int64_t>(g.offsets.size()), arrow::uint64()));
+    else
+    {
+        const K *keys = g.edgeKeys.data();
+        auto fill = [keys, base](int64_t begin, int64_t end, auto &bufs) {
+            using Id = std::decay_t<decltype(bufs[0][0])>;
+            for (int64_t i = begin; i < end; ++i)
+                bufs[0][static_cast<size_t>(i - begin)] = static_cast<Id>(keys[i] + base);
+        };
+        const std::string path = output_path + ".indices.parquet";
+        const std::vector<std::string> names{spec.indices_col};
+        const int64_t rows = static_cast<int64_t>(g.edgeKeys.size());
+        if (spec.u64_indices || sizeof(K) == 8)
+            writeParquetIdColumns<uint64_t>(path, names, rows, fill);
+        else
+            writeParquetIdColumns<uint32_t>(path, names, rows, fill);
+    }
+
+    // Offsets column. A base of k prepends k empty vertices, so row r starts at
+    // offsets[r - k] and the k leading rows are zero.
+    if (base == 0)
+    {
+        writeParquetColumn(output_path + ".indptr.parquet", spec.indptr_col,
+                           wrapZeroCopy(g.offsets.data(), static_cast<int64_t>(g.offsets.size()), arrow::uint64()));
+    }
+    else
+    {
+        const O *off = g.offsets.data();
+        writeParquetIdColumns<uint64_t>(
+            output_path + ".indptr.parquet", {spec.indptr_col},
+            static_cast<int64_t>(g.offsets.size() + base),
+            [off, base](int64_t begin, int64_t end, std::vector<std::vector<uint64_t>> &bufs) {
+                for (int64_t r = begin; r < end; ++r)
+                    bufs[0][static_cast<size_t>(r - begin)] =
+                        static_cast<uint64_t>(r) < base ? uint64_t{} : static_cast<uint64_t>(off[r - base]);
+            });
+    }
 }
 
 // Whether a writer emits every stored arc rather than one row per edge. A graph
@@ -270,12 +310,13 @@ void writeGraphToCSV(const BuiltGraph<K, O> &bg, const std::string &output_path,
     const size_t n = g.span();
     const char sep = spec.sep;
     const bool every_arc = emitsEveryArc(bg, spec);
+    const uint32_t base = (uint32_t)spec.base_index;
 
     auto lineBytes = [&](size_t u) {
         size_t bytes = 0;
         g.forEachEdgeKey((K)u, [&](K v) {
             if (every_arc || v > (K)u)
-                bytes += numDigits((uint32_t)u) + 1 + numDigits((uint32_t)v) + 1;
+                bytes += numDigits((uint32_t)u + base) + 1 + numDigits((uint32_t)v + base) + 1;
         });
         return bytes;
     };
@@ -283,9 +324,9 @@ void writeGraphToCSV(const BuiltGraph<K, O> &bg, const std::string &output_path,
         g.forEachEdgeKey((K)u, [&](K v) {
             if (every_arc || v > (K)u)
             {
-                p = std::to_chars(p, p + 11, (uint32_t)u).ptr;
+                p = std::to_chars(p, p + 11, (uint32_t)u + base).ptr;
                 *p++ = sep;
-                p = std::to_chars(p, p + 11, (uint32_t)v).ptr;
+                p = std::to_chars(p, p + 11, (uint32_t)v + base).ptr;
                 *p++ = '\n';
             }
         });
@@ -309,6 +350,7 @@ void writeGraphToEdgelistParquet(const BuiltGraph<K, O> &bg, const std::string &
     const DiGraphCsr<K, O> &g = bg.g;
     const size_t n = g.span();
     const bool every_arc = emitsEveryArc(bg, spec);
+    const uint32_t base = static_cast<uint32_t>(spec.base_index);
     const int T = num_threads > 1 ? static_cast<int>(num_threads) : 1;
 
     // Emitting every arc means the CSR offsets already are the row mapping.
@@ -354,8 +396,8 @@ void writeGraphToEdgelistParquet(const BuiltGraph<K, O> &bg, const std::string &
                     return;
                 if (pos >= 0 && pos < len)
                 {
-                    bufs[0][static_cast<size_t>(pos)] = u;
-                    bufs[1][static_cast<size_t>(pos)] = v;
+                    bufs[0][static_cast<size_t>(pos)] = static_cast<uint32_t>(u) + base;
+                    bufs[1][static_cast<size_t>(pos)] = static_cast<uint32_t>(v) + base;
                 }
                 ++pos;
             });

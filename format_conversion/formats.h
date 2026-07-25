@@ -20,7 +20,9 @@
 
 // ── Read specs ──────────────────────────────────────────────────────────────
 //
-//   base_index      : subtracted from every raw id (e.g. 1 for 1-indexed input).
+//   base_index      : the id of the first vertex as it appears in the file,
+//                     subtracted from every id read. METIS ids are positional,
+//                     so there it may only be 0 or 1.
 //   keep_self_loops : retain u==u edges instead of dropping them.
 //   directed        : false stores both directions of each edge; true stores
 //                     only the arc u->v.
@@ -38,6 +40,7 @@ struct CsvEdgelistRead
 struct MetisRead
 {
     char comment_char = '#';
+    uint64_t base_index = 1;
 };
 
 // symmetric: whether the file holds both directions of each edge. No CSR file
@@ -47,6 +50,7 @@ struct CsrParquetRead
 {
     std::string indices_col = "indices";
     std::string indptr_col = "indptr";
+    uint64_t base_index = 0;
     bool symmetric = true;
 };
 
@@ -65,6 +69,10 @@ struct EdgelistParquetRead
 // the spec: a symmetric CSR emits each edge once as u,v with u<v, and a graph
 // built with directed=true emits every stored arc.
 //
+//   base_index       : the id the first vertex is given in the file, added to
+//                      every id written. On CsrParquet.Write it also prepends
+//                      that many empty entries to indptr. METIS ids are
+//                      positional, so there it may only be 0 or 1.
 //   expand_symmetric : emit both u,v and v,u for each edge of a symmetric graph.
 //   u64_indices /
 //   u64_ids          : widen the emitted id column(s) from uint32 to uint64, to
@@ -73,17 +81,20 @@ struct EdgelistParquetRead
 struct CsvEdgelistWrite
 {
     char sep = ',';
+    uint64_t base_index = 0;
     bool expand_symmetric = false;
 };
 
 struct MetisWrite
 {
+    uint64_t base_index = 1;
 };
 
 struct CsrParquetWrite
 {
     std::string indices_col = "indices";
     std::string indptr_col = "indptr";
+    uint64_t base_index = 0;
     bool u64_indices = false;
 };
 
@@ -91,6 +102,7 @@ struct EdgelistParquetWrite
 {
     std::string source_col = "source";
     std::string target_col = "target";
+    uint64_t base_index = 0;
     bool u64_ids = false;
     bool expand_symmetric = false;
 };
@@ -169,6 +181,38 @@ inline bool readSymmetric(const GraphSpec &s)
                 return v.symmetric;
             else
                 throw std::logic_error("readSymmetric: not a read spec");
+        },
+        s);
+}
+
+inline uint64_t specBaseIndex(const GraphSpec &s)
+{
+    return std::visit([](auto &&v) { return v.base_index; }, s);
+}
+
+// Whether the spec leaves base_index at the value its format declares as default
+// (0, or 1 for METIS).
+inline bool hasDefaultBaseIndex(const GraphSpec &s)
+{
+    return std::visit(
+        [](auto &&v) {
+            using T = std::decay_t<decltype(v)>;
+            return v.base_index == T{}.base_index;
+        },
+        s);
+}
+
+// A METIS line carries no vertex id: line i is vertex i + base_index. Any other
+// base would desynchronise that from the neighbour ids on the line.
+inline void validateSpecBase(const GraphSpec &s)
+{
+    std::visit(
+        [](auto &&v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, MetisRead> || std::is_same_v<T, MetisWrite>)
+                if (v.base_index > 1)
+                    throw std::runtime_error("METIS vertex ids are positional; base_index must be 0 or 1 (got " +
+                                             std::to_string(v.base_index) + ")");
         },
         s);
 }

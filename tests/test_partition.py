@@ -208,6 +208,23 @@ def test_sort_neighbors_not_implemented(graph, tmp_path):
               nodes=_node(graph), sort_neighbors=False)
 
 
+def test_base_index_not_implemented(graph, tmp_path):
+    """Row i of a label's nodes.csv is its local id i, so a shifted numbering is
+    rejected rather than quietly breaking that. Each format's own default passes."""
+    out = tmp_path / "parts"
+    with pytest.raises(NotImplementedError):
+        partition(_csv_in(graph), graph["labels"], out, spec.CsrParquet.Write(base_index=1),
+                  nodes=_node(graph))
+    with pytest.raises(NotImplementedError):
+        partition(_csv_in(graph), graph["labels"], out, spec.Metis.Write(base_index=0),
+                  nodes=_node(graph))
+
+    partition(_csv_in(graph), graph["labels"], tmp_path / "ok_csr",
+              spec.CsrParquet.Write(), nodes=_node(graph))
+    partition(_csv_in(graph), graph["labels"], tmp_path / "ok_metis",
+              spec.Metis.Write(base_index=1), nodes=_node(graph))
+
+
 def test_metis_output_rejects_directed_input(graph, tmp_path):
     """A graph read as arcs only cannot be written as METIS, in partition as in
     convert."""
