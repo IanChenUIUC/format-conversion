@@ -112,6 +112,34 @@ scratch at `PARQUET_CHUNK_ROWS` rather than materialising a second `indptr` — 
 its local id *i*, and a shifted numbering would break that with no way to express
 the phantom rows.
 
+## The CSV header is a name pair, not a line
+
+`CsvEdgelist.Write` spells its header as `source_col` / `target_col` plus a `header`
+flag rather than one free-form string, so the separator between the two names cannot
+drift from `sep`, and so the field names match `EdgelistParquet.Write` — the two edge
+list writers describe their columns the same way. The names are inert when `header`
+is false.
+
+Emitting it costs nothing: `writeLinesMmap` already takes a header for the METIS
+`n m` line, sets `off[0]` past it and `memcpy`s it into the mapping, so the per-edge
+lambdas are untouched. The one visible consequence is at the empty end — the writer's
+`total == 0` early return no longer fires when a header is present, so a graph with no
+emitted rows produces a header-only file instead of an empty one. That is what a
+downstream reader wants.
+
+There is deliberately no `header` on `CsvEdgelistRead`: a header is a row to skip and
+`skip_rows` already skips rows, so a second field would only need a rule for what
+setting both means. Instead the two defaults are paired — `header = true` on the write
+side, `skip_rows = 1` on the read side — so `convert()` can consume its own CSV output
+with no arguments.
+
+That pairing is chosen with its cost understood. A headerless CSV from another tool,
+read at defaults, loses its first edge silently: the line is skipped, not rejected, and
+if it held that vertex's only edge the vertex disappears too. The alternative — leaving
+`skip_rows = 0` — makes the round trip fail instead, loudly (the reader raises `Failed
+to read number` on the header line), but leaves the tool unable to read what it just
+wrote without an argument. The round trip won.
+
 ## What is memory-mapped, and for how long
 
 Only the two text formats are mapped, and only for the duration of `buildGraph`:

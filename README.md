@@ -39,7 +39,7 @@ silently ignored.
 
 |                   | Read spec                                                                               | Write spec                                                                             |
 |---                |---                                                                                      |---                                                                                     |
-| CSV edge list     | `CsvEdgelist.Read(sep, comment_char, skip_rows, base_index, keep_self_loops, directed)` | `CsvEdgelist.Write(sep, base_index, expand_symmetric)`                                 |
+| CSV edge list     | `CsvEdgelist.Read(sep, comment_char, skip_rows=1, base_index, keep_self_loops, directed)` | `CsvEdgelist.Write(sep, source_col, target_col, base_index, header, expand_symmetric)` |
 | METIS             | `Metis.Read(comment_char, base_index)`                                                  | `Metis.Write(base_index)`                                                              |
 | CSR Parquet       | `CsrParquet.Read(indices_col, indptr_col, base_index, symmetric)`                       | `CsrParquet.Write(indices_col, indptr_col, base_index, u64_indices)`                   |
 | Parquet edge list | `EdgelistParquet.Read(source_col, target_col, base_index, keep_self_loops, directed)`   | `EdgelistParquet.Write(source_col, target_col, base_index, u64_ids, expand_symmetric)` |
@@ -100,6 +100,28 @@ Ids are 32-bit, so a `base_index` that would push the largest id past `UINT32_MA
 is rejected before anything is written. `partition()` accepts only each format's
 default, since a shifted numbering would break the correspondence between a
 label's `nodes.csv` rows and its local ids.
+
+### CSV headers
+
+`CsvEdgelist.Write` writes `source_col`, the separator, and `target_col` as the
+first line. It is **on by default**, paired with `CsvEdgelist.Read`'s
+`skip_rows=1`, so the two sides round trip with no arguments at all:
+
+```python
+fmt.convert(graph_in, fmt.GraphDescriptor("out/dnc", fmt.CsvEdgelist.Write()))
+fmt.convert(fmt.GraphDescriptor("out/dnc.csv", fmt.CsvEdgelist.Read()), ...)
+```
+
+There is no `header` on the read side — a header is a row to skip, and
+`skip_rows` already skips rows. The cost of that default is on input this tool
+did not write: **a headerless CSV read at defaults silently loses its first
+edge.** Pass `skip_rows=0` for those.
+
+```python
+fmt.CsvEdgelist.Read(skip_rows=0)               # headerless input
+fmt.CsvEdgelist.Write(header=False)             # headerless output
+fmt.CsvEdgelist.Write(source_col="src", target_col="dst")
+```
 
 ### Parquet edge lists
 

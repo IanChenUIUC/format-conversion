@@ -11,7 +11,7 @@ class CsvEdgelist:
         comment_char: str
         keep_self_loops: bool
         directed: bool
-        def __init__(self, *, sep: str = ',', comment_char: str = '#', skip_rows: typing.SupportsInt = 0, base_index: typing.SupportsInt = 0, keep_self_loops: bool = False, directed: bool = False) -> None:
+        def __init__(self, *, sep: str = ',', comment_char: str = '#', skip_rows: typing.SupportsInt = 1, base_index: typing.SupportsInt = 0, keep_self_loops: bool = False, directed: bool = False) -> None:
             ...
         @property
         def skip_rows(self) -> int:
@@ -27,8 +27,11 @@ class CsvEdgelist:
             ...
     class Write:
         sep: str
+        source_col: str
+        target_col: str
+        header: bool
         expand_symmetric: bool
-        def __init__(self, *, sep: str = ',', base_index: typing.SupportsInt = 0, expand_symmetric: bool = False) -> None:
+        def __init__(self, *, sep: str = ',', source_col: str = 'source', target_col: str = 'target', base_index: typing.SupportsInt = 0, header: bool = True, expand_symmetric: bool = False) -> None:
             ...
         @property
         def base_index(self) -> int:

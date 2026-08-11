@@ -23,6 +23,10 @@
 //   base_index      : the id of the first vertex as it appears in the file,
 //                     subtracted from every id read. METIS ids are positional,
 //                     so there it may only be 0 or 1.
+//   skip_rows       : leading rows to discard. Defaults to 1 on CsvEdgelistRead,
+//                     matching the header CsvEdgelistWrite emits by default; a
+//                     file without one needs skip_rows = 0 or its first edge is
+//                     silently discarded.
 //   keep_self_loops : retain u==u edges instead of dropping them.
 //   directed        : false stores both directions of each edge; true stores
 //                     only the arc u->v.
@@ -31,7 +35,7 @@ struct CsvEdgelistRead
 {
     char sep = ',';           // ',' | '\t' | ' '
     char comment_char = '#';  // '#' | '%'
-    size_t skip_rows = 0;
+    size_t skip_rows = 1;
     uint64_t base_index = 0;
     bool keep_self_loops = false;
     bool directed = false;
@@ -73,6 +77,11 @@ struct EdgelistParquetRead
 //                      every id written. On CsrParquet.Write it also prepends
 //                      that many empty entries to indptr. METIS ids are
 //                      positional, so there it may only be 0 or 1.
+//   source_col /
+//   target_col       : names of the two id columns. On CsvEdgelist.Write they
+//                      fill the header line and are otherwise unused.
+//   header           : write "source_col<sep>target_col" as the first line. On by
+//                      default, paired with CsvEdgelistRead's skip_rows = 1.
 //   expand_symmetric : emit both u,v and v,u for each edge of a symmetric graph.
 //   u64_indices /
 //   u64_ids          : widen the emitted id column(s) from uint32 to uint64, to
@@ -81,7 +90,10 @@ struct EdgelistParquetRead
 struct CsvEdgelistWrite
 {
     char sep = ',';
+    std::string source_col = "source";
+    std::string target_col = "target";
     uint64_t base_index = 0;
+    bool header = true;
     bool expand_symmetric = false;
 };
 

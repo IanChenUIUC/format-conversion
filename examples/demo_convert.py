@@ -30,7 +30,7 @@ def main() -> None:
     input_spec = fmt.CsvEdgelist.Read(
         sep=",",                    # ',' | '\t' | ' '
         comment_char="#",           # '#' | '%'
-        skip_rows=1,
+        skip_rows=1,                # default; matches the header CsvEdgelist.Write emits
         base_index=0,               # id of the first vertex in the file; subtracted on read
         keep_self_loops=False,
         directed=False,             # False stores both directions of each edge; True only u->v
@@ -72,7 +72,10 @@ def main() -> None:
 
     # output_spec = fmt.CsvEdgelist.Write(  # -> dnc.csv
     #     sep=",",
+    #     source_col="source",      # the two column names, used only when header=True
+    #     target_col="target",
     #     base_index=0,
+    #     header=True,              # writes "source,target" first; read back with skip_rows=1
     #     expand_symmetric=False,   # True emits both u,v and v,u for each undirected edge
     # )
 

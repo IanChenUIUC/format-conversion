@@ -13,7 +13,8 @@ import sys
 import pytest
 from pathlib import Path
 from .formats import FORMATS, Format
-from .helpers import write_edgelist, read_nodelist, read_nodelist_rows, read_nodelist_header
+from .helpers import (write_edgelist, read_edgelist, read_nodelist, read_nodelist_rows,
+                      read_nodelist_header)
 
 try:
     import format_conversion.format as spec
@@ -186,8 +187,8 @@ def test_output_spec_is_independent_of_input(tmp_path):
     labels = tmp_path / "labels.txt"; labels.write_text("0\n0\n1\n1\n")
 
     out = tmp_path / "parts"
-    partition(GraphDescriptor(str(edges), spec.CsvEdgelist.Read(sep=",")),
-              labels, out, spec.CsvEdgelist.Write(sep="\t"),
+    partition(GraphDescriptor(str(edges), spec.CsvEdgelist.Read(sep=",", skip_rows=0)),
+              labels, out, spec.CsvEdgelist.Write(sep="\t", header=False),
               nodes=NodeDescriptor(str(nodes), spec.Nodelist.Csv(skip_rows=1)))
 
     written = [p for p in out.rglob("graph.csv") if p.stat().st_size > 0]
@@ -238,3 +239,16 @@ def test_partition_rejects_read_spec_output(graph, tmp_path):
     with pytest.raises(Exception, match=r"CsvEdgelist\.Read"):
         partition(_csv_in(graph), graph["labels"], tmp_path / "parts",
                   spec.CsvEdgelist.Read(), nodes=_node(graph))
+
+
+def test_csv_header_passed_through(graph, tmp_path):
+    """Unlike base_index, a header does not disturb local-id numbering, so it is
+    simply written onto each label's graph.csv."""
+    out = tmp_path / "parts"
+    partition(_csv_in(graph), graph["labels"], out,
+              spec.CsvEdgelist.Write(header=True), nodes=_node(graph))
+
+    for label, expected in graph["spec"].intra_local().items():
+        path = out / str(label) / "graph.csv"
+        assert path.read_text().splitlines()[0] == "source,target"
+        assert read_edgelist(path, header=True) == expected

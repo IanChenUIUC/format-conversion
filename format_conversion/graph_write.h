@@ -299,8 +299,8 @@ inline bool emitsEveryArc(const BuiltGraph<K, O> &bg, const Spec &spec)
     return !bg.symmetric || spec.expand_symmetric;
 }
 
-// Write a headerless CSV edge list: one "u{sep}v" line per emitted row.
-// Parallelised over num_threads.
+// Write a CSV edge list: one "u{sep}v" line per emitted row, optionally preceded
+// by a header naming the two columns. Parallelised over num_threads.
 
 template <class K, class O>
 void writeGraphToCSV(const BuiltGraph<K, O> &bg, const std::string &output_path, const CsvEdgelistWrite &spec,
@@ -311,6 +311,11 @@ void writeGraphToCSV(const BuiltGraph<K, O> &bg, const std::string &output_path,
     const char sep = spec.sep;
     const bool every_arc = emitsEveryArc(bg, spec);
     const uint32_t base = (uint32_t)spec.base_index;
+
+    // Bound as a string_view below, so it has to outlive the write.
+    std::string hdr;
+    if (spec.header)
+        hdr = spec.source_col + sep + spec.target_col + '\n';
 
     auto lineBytes = [&](size_t u) {
         size_t bytes = 0;
@@ -332,7 +337,7 @@ void writeGraphToCSV(const BuiltGraph<K, O> &bg, const std::string &output_path,
         });
     };
 
-    writeLinesMmap(output_path + ".csv", n, {}, lineBytes, writeLine, num_threads);
+    writeLinesMmap(output_path + ".csv", n, hdr, lineBytes, writeLine, num_threads);
 }
 
 // Write the CSR as a Parquet edge list: one file, two id columns named by

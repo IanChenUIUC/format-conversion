@@ -71,7 +71,7 @@ def _read_metis(base: Path) -> frozenset:
     return read_metis(Path(str(base) + ".metis"))
 
 def _read_csv(base: Path) -> frozenset:
-    return read_edgelist(Path(str(base) + ".csv"), header=False)
+    return read_edgelist(Path(str(base) + ".csv"), header=True)
 
 def _read_parquet(base: Path) -> frozenset:
     return read_csr_parquet(base)      # helper already knows the two-file convention

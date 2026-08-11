@@ -63,7 +63,7 @@ PYBIND11_MODULE(format, m)
                          bool directed) {
                  return CsvEdgelistRead{sep, comment_char, skip_rows, base_index, keep_self_loops, directed};
              }),
-             py::kw_only(), py::arg("sep") = ',', py::arg("comment_char") = '#', py::arg("skip_rows") = size_t{0},
+             py::kw_only(), py::arg("sep") = ',', py::arg("comment_char") = '#', py::arg("skip_rows") = size_t{1},
              py::arg("base_index") = uint64_t{0}, py::arg("keep_self_loops") = false, py::arg("directed") = false)
         .def_readwrite("sep", &CsvEdgelistRead::sep)
         .def_readwrite("comment_char", &CsvEdgelistRead::comment_char)
@@ -72,13 +72,19 @@ PYBIND11_MODULE(format, m)
         .def_readwrite("keep_self_loops", &CsvEdgelistRead::keep_self_loops)
         .def_readwrite("directed", &CsvEdgelistRead::directed);
     py::class_<CsvEdgelistWrite>(csv, "Write")
-        .def(py::init([](char sep, uint64_t base_index, bool expand_symmetric) {
-                 return CsvEdgelistWrite{sep, base_index, expand_symmetric};
+        .def(py::init([](char sep, std::string source_col, std::string target_col, uint64_t base_index, bool header,
+                         bool expand_symmetric) {
+                 return CsvEdgelistWrite{sep,        std::move(source_col), std::move(target_col),
+                                         base_index, header,                expand_symmetric};
              }),
-             py::kw_only(), py::arg("sep") = ',', py::arg("base_index") = uint64_t{0},
+             py::kw_only(), py::arg("sep") = ',', py::arg("source_col") = "source",
+             py::arg("target_col") = "target", py::arg("base_index") = uint64_t{0}, py::arg("header") = true,
              py::arg("expand_symmetric") = false)
         .def_readwrite("sep", &CsvEdgelistWrite::sep)
+        .def_readwrite("source_col", &CsvEdgelistWrite::source_col)
+        .def_readwrite("target_col", &CsvEdgelistWrite::target_col)
         .def_readwrite("base_index", &CsvEdgelistWrite::base_index)
+        .def_readwrite("header", &CsvEdgelistWrite::header)
         .def_readwrite("expand_symmetric", &CsvEdgelistWrite::expand_symmetric);
 
     auto metis = formatHolder<MetisTag>(m, "Metis");

@@ -30,7 +30,7 @@ def main() -> None:
         fmt.CsvEdgelist.Read(
             sep=",",
             comment_char="#",
-            skip_rows=1,
+            skip_rows=1,            # default; matches the header CsvEdgelist.Write emits
             base_index=0,
             keep_self_loops=False,
             directed=False,

@@ -58,6 +58,7 @@ def _pq_in(path, **kw) -> GraphDescriptor:
     return GraphDescriptor(str(path), fmt.EdgelistParquet.Read(**kw))
 
 def _plain_csv_in(path, **kw) -> GraphDescriptor:
+    kw.setdefault("skip_rows", 0)  # these fixtures are written without a header
     return GraphDescriptor(str(path), fmt.CsvEdgelist.Read(**kw))
 
 
@@ -261,12 +262,12 @@ def test_directed_csv_preserves_arcs(tmp_path):
     edges.write_text("src,dst\n0,1\n1,0\n2,3\n")  # 0<->1 (two arcs), 2->3
 
     convert(_plain_csv_in(edges, skip_rows=1, directed=True), _csv_out(tmp_path / "dir"))
-    assert read_edgelist_arcs(tmp_path / "dir.csv") == [(0, 1), (1, 0), (2, 3)]
+    assert read_edgelist_arcs(tmp_path / "dir.csv", header=True) == [(0, 1), (1, 0), (2, 3)]
 
     # Undirected default: each edge symmetrized; 0,1 and 1,0 are the same
     # undirected edge, emitted once with u<v per input occurrence (2 copies).
     convert(_plain_csv_in(edges, skip_rows=1), _csv_out(tmp_path / "und"))
-    assert read_edgelist_arcs(tmp_path / "und.csv") == [(0, 1), (0, 1), (2, 3)]
+    assert read_edgelist_arcs(tmp_path / "und.csv", header=True) == [(0, 1), (0, 1), (2, 3)]
 
 
 def test_directed_csr_out_degrees(tmp_path):
@@ -313,7 +314,7 @@ def test_directed_csr_roundtrip(tmp_path):
     convert(GraphDescriptor(str(tmp_path / "csr") + ".indices.parquet",
                             fmt.CsrParquet.Read(symmetric=False)),
             _csv_out(tmp_path / "back"))
-    assert read_edgelist_arcs(tmp_path / "back.csv") == expected
+    assert read_edgelist_arcs(tmp_path / "back.csv", header=True) == expected
 
 
 def test_csr_symmetric_declaration_gates_metis(tmp_path):
@@ -337,7 +338,7 @@ def test_csr_symmetric_declaration_gates_metis(tmp_path):
 # ── expand_symmetric ───────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("writer,reader", [
-    ("csv", lambda p: read_edgelist_arcs(Path(str(p) + ".csv"))),
+    ("csv", lambda p: read_edgelist_arcs(Path(str(p) + ".csv"), header=True)),
     ("edgelist_parquet", lambda p: read_edgelist_parquet_arcs(Path(str(p) + ".parquet"))),
 ], ids=["csv", "edgelist_parquet"])
 def test_expand_symmetric_emits_both_directions(tmp_path, writer, reader):
@@ -363,7 +364,8 @@ def test_expand_symmetric_is_noop_on_arcs_only_graph(tmp_path):
 
     convert(_plain_csv_in(edges, directed=True), _csv_out(tmp_path / "plain"))
     convert(_plain_csv_in(edges, directed=True), _csv_out(tmp_path / "exp", expand_symmetric=True))
-    assert read_edgelist_arcs(tmp_path / "exp.csv") == read_edgelist_arcs(tmp_path / "plain.csv")
+    assert read_edgelist_arcs(tmp_path / "exp.csv", header=True) == \
+           read_edgelist_arcs(tmp_path / "plain.csv", header=True)
 
 
 # ── read / write spec separation ───────────────────────────────────────────────
@@ -731,8 +733,8 @@ def test_csv_write_base_shifts_every_id(tmp_path):
     p_lines = (tmp_path / "plain.csv").read_text().splitlines()
     s_lines = (tmp_path / "shifted.csv").read_text().splitlines()
     assert len(p_lines) == len(s_lines)
-    assert read_edgelist_arcs(tmp_path / "shifted.csv", base=5) == \
-           read_edgelist_arcs(tmp_path / "plain.csv")
+    assert read_edgelist_arcs(tmp_path / "shifted.csv", header=True, base=5) == \
+           read_edgelist_arcs(tmp_path / "plain.csv", header=True)
 
 
 def test_edgelist_parquet_write_base_shifts_every_id(tmp_path):
@@ -768,3 +770,76 @@ def test_base_index_overflow_is_all_or_nothing(tmp_path):
     with pytest.raises(RuntimeError, match="overflows the 32-bit id range"):
         convert(_plain_csv_in(edges_path), [_csv_out(good), _csr_out(bad, base_index=2**32)])
     assert not (tmp_path / "good.csv").exists()
+
+
+# ── CSV header on the write side ──────────────────────────────────────────────
+
+def test_csv_header_written_by_default(tmp_path):
+    """The default names the two columns on a first line; header=False is the opt-out,
+    and the two differ by exactly that line."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+
+    plain, headed = tmp_path / "plain", tmp_path / "headed"
+    convert(_plain_csv_in(edges_path), _csv_out(plain, header=False), sort_neighbors=True)
+    convert(_plain_csv_in(edges_path), _csv_out(headed), sort_neighbors=True)
+
+    assert (tmp_path / "plain.csv").read_text() == "0,1\n1,2\n"
+    assert (tmp_path / "headed.csv").read_text() == \
+           "source,target\n" + (tmp_path / "plain.csv").read_text()
+
+
+def test_csv_header_uses_column_names_and_sep(tmp_path):
+    """The header line is source_col + sep + target_col, so it can never disagree
+    with the separator the rows use."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+    out = tmp_path / "out"
+    convert(_plain_csv_in(edges_path),
+            _csv_out(out, sep="\t", source_col="src", target_col="dst"),
+            sort_neighbors=True)
+
+    lines = (tmp_path / "out.csv").read_text().splitlines()
+    assert lines[0] == "src\tdst"
+    assert lines[1] == "0\t1"
+
+
+def test_csv_header_round_trip_at_defaults(tmp_path):
+    """Write and Read default to each other: CsvEdgelist.Read()'s skip_rows=1 consumes
+    the header CsvEdgelist.Write() emits, so a convert of a convert is byte-identical."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+
+    first, second = tmp_path / "first", tmp_path / "second"
+    convert(_plain_csv_in(edges_path), _csv_out(first), sort_neighbors=True)
+    convert(GraphDescriptor(str(first) + ".csv", fmt.CsvEdgelist.Read()),
+            _csv_out(second), sort_neighbors=True)
+
+    assert (tmp_path / "second.csv").read_bytes() == (tmp_path / "first.csv").read_bytes()
+
+
+def test_csv_header_with_base_index(tmp_path):
+    """The header is unaffected by base_index; only the ids shift."""
+    edges_path = tmp_path / "e.csv"
+    write_edgelist(edges_path, _PATH3_EDGES, header=False)
+    out = tmp_path / "out"
+    convert(_plain_csv_in(edges_path), _csv_out(out, base_index=1),
+            sort_neighbors=True)
+
+    lines = (tmp_path / "out.csv").read_text().splitlines()
+    assert lines[0] == "source,target"
+    assert read_edgelist_arcs(tmp_path / "out.csv", header=True, base=1) == \
+           sorted(_PATH3_EDGES)
+
+
+def test_csv_header_only_when_no_rows(tmp_path):
+    """A graph with nothing to emit still gets its header, rather than the empty
+    file the no-header path produces."""
+    edges_path = tmp_path / "e.csv"
+    edges_path.write_text("")
+    empty, headed = tmp_path / "empty", tmp_path / "headed"
+    convert(_plain_csv_in(edges_path), _csv_out(empty, header=False))
+    convert(_plain_csv_in(edges_path), _csv_out(headed))
+
+    assert (tmp_path / "empty.csv").read_text() == ""
+    assert (tmp_path / "headed.csv").read_text() == "source,target\n"
